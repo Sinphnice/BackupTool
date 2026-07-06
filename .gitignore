@@ -1,0 +1,9 @@
+.codex/
+.agents/
+
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+core/build*/

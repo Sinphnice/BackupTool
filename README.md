@@ -51,6 +51,51 @@ BackupTool 是《软件开发综合实验》课程项目，目标是设计并实
 
 后续开发中应保持源码、文档、测试和构建脚本同步维护，确保项目可以被稳定构建、运行和验证。
 
+## 第一阶段运行方式
+
+当前第一阶段只用于验证 Tauri GUI 到 C++ Core 的最小调用链：
+
+```text
+GUI -> TypeScript -> Tauri Rust command -> C ABI -> C++ Core
+```
+
+页面提供一个 `Test C++ Core` 按钮，点击后调用 Tauri command `core_version`，最终由 C++ 函数返回：
+
+```text
+Backup Core 0.1.0
+```
+
+### 构建与运行
+
+详细的环境配置、依赖检查和构建流程见 [开发环境与构建说明](docs/DEVELOPMENT.md)。
+
+首次配置：
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
+just setup
+```
+
+常用命令：
+
+```bash
+just check
+just test
+just dev
+```
+
+完整 release 构建：
+
+```bash
+just build
+```
+
+构建成功后，可执行程序位于：
+
+```text
+src-tauri/target/release/backup-tool.exe
+```
+
 ## 文档来源
 
 课程要求参考 [docs/course.md](docs/course.md)。
