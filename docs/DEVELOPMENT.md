@@ -102,6 +102,20 @@ just test
 just dev
 ```
 
+只启动 Vite dev server：
+
+```powershell
+just vite
+```
+
+该命令等价于：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vite.ps1
+```
+
+它会在 `http://127.0.0.1:1420` 启动前端开发服务。只有在需要手动运行 debug 版 Tauri 程序时才需要单独启动 Vite；正常开发建议直接使用 `just dev`。
+
 构建 release 应用和安装包：
 
 ```powershell
@@ -144,6 +158,8 @@ just clean
 2. 启动 Vite dev server。
 3. 启动 Tauri dev 应用。
 4. Tauri 退出后关闭 Vite dev server。
+
+如果直接双击或手动运行 debug 版 `src-tauri/target/debug/backup-tool.exe`，程序仍会尝试访问 `http://127.0.0.1:1420`。此时必须先运行 `just vite` 并保持该 PowerShell 窗口打开，否则界面会显示 `ERR_CONNECTION_REFUSED`。
 
 ## 常见问题
 

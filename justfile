@@ -13,6 +13,9 @@ frontend-build:
     .\node_modules\.bin\tsc.cmd
     .\node_modules\.bin\vite.cmd build src --outDir ../dist --emptyOutDir
 
+vite:
+    .\scripts\start-vite.ps1
+
 core-config:
     just core-config-debug
 
