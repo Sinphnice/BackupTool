@@ -8,10 +8,11 @@ project(BackupCore LANGUAGES CXX)
 
 option(BACKUP_CORE_BUILD_TESTS "Build Backup Core tests" ON)
 
-add_library(backup_core STATIC
-    src/backup_c_api.cpp
-    src/version.cpp
+file(GLOB_RECURSE BACKUP_CORE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+
+add_library(backup_core STATIC ${BACKUP_CORE_SOURCES})
 
 target_compile_features(backup_core PUBLIC cxx_std_17)
 
