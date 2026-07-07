@@ -48,6 +48,7 @@ function optionalUnixSeconds(selector: string): number | undefined {
   if (!value) {
     return undefined;
   }
+  // Tauri 会把数字时间戳传给 backup-core；核心库按 Unix 秒比较文件修改时间。
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : undefined;
 }
@@ -58,6 +59,7 @@ function optionalText(selector: string): string | undefined {
 }
 
 function collectFilter(): BackupFilter {
+  // 空字段不传给 Rust core，使其表示“未启用该筛选条件”，而不是匹配空字符串。
   return {
     includePathContains: optionalText("#include-path"),
     excludePathContains: optionalText("#exclude-path"),

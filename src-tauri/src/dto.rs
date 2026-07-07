@@ -1,6 +1,9 @@
 use backup_core::{split_filter_list, BackupFilter};
 use serde::{Deserialize, Serialize};
 
+/// 从 TypeScript 接收的筛选条件载荷。
+///
+/// 跨 Tauri 边界时字段名使用 camelCase；进入备份逻辑前会转换为 Rust core 的筛选模型。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupFilterDto {
@@ -15,6 +18,7 @@ pub(crate) struct BackupFilterDto {
     pub(crate) modified_before: Option<i64>,
 }
 
+/// 备份完成后返回给 GUI 的稳定命令响应结构。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupResultDto {
@@ -22,6 +26,7 @@ pub(crate) struct BackupResultDto {
     pub(crate) byte_count: u64,
 }
 
+/// 恢复完成后返回给 GUI 的稳定命令响应结构。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RestoreResultDto {

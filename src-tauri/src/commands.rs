@@ -2,6 +2,9 @@ use crate::dto::{BackupFilterDto, BackupResultDto, RestoreResultDto};
 use backup_core::{BackupConfig, BackupManager, RestoreConfig, RestoreManager};
 use std::path::PathBuf;
 
+/// 从 GUI 命令层启动一次同步 legacy 镜像备份。
+///
+/// 这一层只负责校验和转换 Tauri DTO，实际备份行为全部交给 `backup-core`。
 #[tauri::command]
 pub(crate) fn backup(
     source: String,
@@ -22,6 +25,7 @@ pub(crate) fn backup(
     })
 }
 
+/// 将 legacy 镜像备份目录恢复到目标目录。
 #[tauri::command]
 pub(crate) fn restore(
     backup_path: String,
@@ -41,6 +45,8 @@ pub(crate) fn restore(
 }
 
 fn path_from_input(value: String, name: &'static str) -> Result<PathBuf, String> {
+    // 路径输入校验放在命令层：`backup-core` 接收类型化路径，
+    // 前端调用方仍然得到简单的字符串错误。
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(format!("{name} path must not be empty"));

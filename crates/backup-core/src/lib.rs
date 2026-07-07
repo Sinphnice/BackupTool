@@ -45,6 +45,9 @@ impl From<std::io::Error> for BackupError {
 
 pub type BackupCoreResult<T> = Result<T, BackupError>;
 
+/// legacy 镜像备份流程使用的用户筛选条件。
+///
+/// include 列表为空表示不过滤；exclude 规则一旦匹配，优先排除对应文件。
 #[derive(Debug, Clone, Default)]
 pub struct BackupFilter {
     pub include_path_contains: Vec<String>,
@@ -59,6 +62,7 @@ pub struct BackupFilter {
 }
 
 impl BackupFilter {
+    /// 判断一个普通文件是否应该被复制到备份输出目录。
     pub fn allows(&self, relative_path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<bool> {
         let path_text = normalize_path_text(relative_path);
         let name_text = relative_path
@@ -129,6 +133,7 @@ impl BackupFilter {
     }
 }
 
+/// 将源目录复制到备份目录时使用的配置。
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
     pub source: PathBuf,
@@ -136,24 +141,28 @@ pub struct BackupConfig {
     pub filter: BackupFilter,
 }
 
+/// 备份成功后返回的统计结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupResult {
     pub file_count: u64,
     pub byte_count: u64,
 }
 
+/// 将 legacy 镜像备份恢复到目标目录时使用的配置。
 #[derive(Debug, Clone)]
 pub struct RestoreConfig {
     pub backup: PathBuf,
     pub destination: PathBuf,
 }
 
+/// 恢复成功后返回的统计结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreResult {
     pub file_count: u64,
     pub byte_count: u64,
 }
 
+/// 执行普通文件和普通目录的 legacy 镜像备份流程。
 pub struct BackupManager;
 
 impl BackupManager {
@@ -171,6 +180,7 @@ impl BackupManager {
     }
 }
 
+/// 从 legacy 镜像备份目录恢复文件。
 pub struct RestoreManager;
 
 impl RestoreManager {
@@ -234,6 +244,7 @@ fn copy_children(
             .map_err(|_| BackupError::SourceDoesNotExist(root.to_path_buf()))?;
         let target = destination.join(relative);
 
+        // 即使目录下的文件之后被筛选规则跳过，也保留源目录结构。
         if metadata.is_dir() {
             fs::create_dir_all(&target)?;
             copy_children(root, &source_path, destination, filter, result)?;
@@ -261,6 +272,7 @@ fn copy_children(
 }
 
 fn normalize_path_text(path: &Path) -> String {
+    // 统一使用平台无关的分隔符，使路径筛选在 Windows 和类 Unix 平台行为一致。
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
@@ -288,12 +300,15 @@ fn modified_unix_seconds(path: &Path, metadata: &fs::Metadata) -> BackupCoreResu
 }
 
 fn system_time_to_unix_seconds(time: SystemTime) -> Option<i64> {
+    // 前端筛选条件使用 Unix 时间戳；当前先拒绝 Unix epoch 之前的文件时间，
+    // 避免在不兼容的时间基准之间做静默比较。
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_secs()).ok(),
         Err(_) => None,
     }
 }
 
+/// 将 GUI 使用的分号分隔列表转换为核心库使用的筛选片段。
 pub fn split_filter_list(value: Option<String>) -> Vec<String> {
     value
         .unwrap_or_default()
