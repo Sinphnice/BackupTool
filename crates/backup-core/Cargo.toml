@@ -1,0 +1,8 @@
+[package]
+name = "backup-core"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "backup_core"
+path = "src/lib.rs"
