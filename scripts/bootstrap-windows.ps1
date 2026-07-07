@@ -78,37 +78,6 @@ function Ensure-CommandWithWinget {
     Install-WingetPackage -PackageId $PackageId -Name $Name -ExtraArgs $InstallExtraArgs
 }
 
-function Get-VsWherePath {
-    $candidate = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $candidate) {
-        return $candidate
-    }
-    return $null
-}
-
-function Test-VsBuildTools {
-    $vswhere = Get-VsWherePath
-    if (-not $vswhere) {
-        return $false
-    }
-
-    $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
-    return [bool]$installation
-}
-
-function Ensure-VsBuildTools {
-    if (Test-VsBuildTools) {
-        Write-Host "Visual Studio C++ Build Tools found." -ForegroundColor Green
-        return
-    }
-
-    $extraArgs = @(
-        "--override",
-        "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-    )
-    Install-WingetPackage -PackageId "Microsoft.VisualStudio.2022.BuildTools" -Name "Visual Studio 2022 Build Tools" -ExtraArgs $extraArgs
-}
-
 function Ensure-Rust {
     if (-not (Test-Command "rustup")) {
         Install-WingetPackage -PackageId "Rustlang.Rustup" -Name "rustup"
@@ -199,8 +168,6 @@ function Ensure-Just {
 
 Write-Section "System tools"
 Ensure-CommandWithWinget -Command "git" -Name "Git" -PackageId "Git.Git"
-Ensure-CommandWithWinget -Command "cmake" -Name "CMake" -PackageId "Kitware.CMake"
-Ensure-VsBuildTools
 
 Write-Section "Rust toolchain"
 Ensure-Rust

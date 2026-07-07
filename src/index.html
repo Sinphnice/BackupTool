@@ -7,7 +7,83 @@
   </head>
   <body>
     <main>
-      <button id="test-core" type="button">Test C++ Core</button>
+      <header>
+        <h1>BackupTool</h1>
+        <button id="test-core" type="button">Test Rust Core</button>
+      </header>
+
+      <section>
+        <h2>Backup</h2>
+        <label>
+          Source directory
+          <input id="backup-source" type="text" autocomplete="off" />
+        </label>
+        <label>
+          Backup directory
+          <input id="backup-destination" type="text" autocomplete="off" />
+        </label>
+        <div class="actions">
+          <button id="start-backup" type="button">Start Backup</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Filters</h2>
+        <div class="grid">
+          <label>
+            Include path contains
+            <input id="include-path" type="text" autocomplete="off" />
+          </label>
+          <label>
+            Exclude path contains
+            <input id="exclude-path" type="text" autocomplete="off" />
+          </label>
+          <label>
+            Extensions
+            <input id="extensions" type="text" autocomplete="off" placeholder="txt;png" />
+          </label>
+          <label>
+            Include file name contains
+            <input id="include-name" type="text" autocomplete="off" />
+          </label>
+          <label>
+            Exclude file name contains
+            <input id="exclude-name" type="text" autocomplete="off" />
+          </label>
+          <label>
+            Minimum size
+            <input id="min-size" type="number" min="0" step="1" />
+          </label>
+          <label>
+            Maximum size
+            <input id="max-size" type="number" min="0" step="1" />
+          </label>
+          <label>
+            Modified after
+            <input id="modified-after" type="datetime-local" />
+          </label>
+          <label>
+            Modified before
+            <input id="modified-before" type="datetime-local" />
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <h2>Restore</h2>
+        <label>
+          Backup directory
+          <input id="restore-backup" type="text" autocomplete="off" />
+        </label>
+        <label>
+          Restore directory
+          <input id="restore-destination" type="text" autocomplete="off" />
+        </label>
+        <div class="actions">
+          <button id="start-restore" type="button">Start Restore</button>
+        </div>
+      </section>
+
       <p id="core-result" aria-live="polite"></p>
     </main>
     <script type="module" src="/main.ts"></script>

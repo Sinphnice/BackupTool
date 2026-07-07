@@ -4,27 +4,22 @@
 
 ## 项目组成
 
-BackupTool 当前采用 Tauri 2 桌面应用结构，顶层使用 `just` 组织构建任务，各语言部分仍由各自标准工具完成构建。
+BackupTool 当前采用 Tauri 2 桌面应用结构，顶层使用 `just` 组织构建任务，各部分仍由各自标准工具完成构建。
 
 | 部分 | 目录 | 语言/框架 | 构建工具 | 作用 |
 | --- | --- | --- | --- | --- |
 | 前端界面 | `src/` | TypeScript, Vite | `pnpm`, `tsc`, `vite` | 构建 Web UI，并通过 Tauri API 调用后端命令 |
-| 桌面壳与命令层 | `src-tauri/` | Rust, Tauri 2 | `cargo`, Tauri CLI | 提供桌面窗口、Tauri command、Rust 到 C ABI 的调用 |
-| 核心库 | `core/` | C++17 | CMake, MSVC | 提供后续备份核心逻辑，目前暴露最小 C API |
+| 桌面壳与命令层 | `src-tauri/` | Rust, Tauri 2 | `cargo`, Tauri CLI | 提供桌面窗口、Tauri command 和 DTO 转换 |
+| 备份核心库 | `crates/backup-core/` | Rust | `cargo` | 实现备份、恢复、筛选和后续仓库式备份核心逻辑 |
 | 顶层任务编排 | `justfile` | just recipe | `just` | 统一组织 setup/check/test/dev/build/run 等命令 |
 
-当前第一阶段的最小调用链为：
+当前调用链为：
 
 ```text
-GUI -> TypeScript -> Tauri Rust command -> C ABI -> C++ Core
+GUI -> TypeScript -> Tauri Rust command -> Rust backup-core
 ```
 
-`just` 只负责任务编排，不替代各语言自己的构建系统：
-
-- 前端依赖和前端构建由 `pnpm`、TypeScript、Vite 完成。
-- C++ Core 配置和构建由 CMake/MSVC 完成。
-- Rust/Tauri 检查、测试、打包由 Cargo 和 Tauri CLI 完成。
-- `src-tauri/build.rs` 不调用 CMake，只负责把已经构建好的 `backup_core.lib` 链接进 Rust/Tauri 应用。
+`src-tauri` 不承载核心备份业务，只负责把 GUI 参数转换为 `backup-core` 的配置对象，并把结果转换回 Tauri command 返回值。
 
 ## Windows 环境要求
 
@@ -36,8 +31,6 @@ GUI -> TypeScript -> Tauri Rust command -> C ABI -> C++ Core
 | Node.js | 22 LTS 或更新 | 前端工具链运行时 |
 | pnpm | 11.7.0 | 前端包管理器 |
 | Rust/rustup | stable MSVC toolchain | Rust/Tauri 构建 |
-| CMake | 3.28 或更新 | C++ Core 配置和生成 VS 工程 |
-| Visual Studio 2022 Build Tools | MSVC v143 + Windows SDK | C++ 编译和链接 |
 | just | 1.55 或更新 | 顶层构建任务入口 |
 
 本仓库包含 `.cargo/config.toml`，固定 `x86_64-pc-windows-msvc` target 使用 `rust-lld.exe` 作为 linker，避免 Windows `PATH` 中其他同名 `link.exe` 干扰 Rust 链接。
@@ -142,22 +135,17 @@ just clean
    - `tsc.cmd`
    - `vite.cmd build src --outDir ../dist --emptyOutDir`
    - 输出前端静态文件到 `dist/`
-2. `core-build-release`
-   - CMake 配置 `core/build/msvc-release`
-   - MSVC 编译生成 `core/build/msvc-release/core/Release/backup_core.lib`
-3. Tauri release 构建
+2. Tauri release 构建
    - `tauri.cmd build`
-   - Cargo 编译 Rust/Tauri 应用
-   - `build.rs` 链接 C++ 静态库
+   - Cargo 编译 Rust/Tauri 应用和 `backup-core`
    - 输出 `src-tauri/target/release/backup-tool.exe`
    - 同时生成 MSI/NSIS 安装包
 
 `just dev` 的流程是：
 
-1. 构建 Debug 版 C++ Core。
-2. 启动 Vite dev server。
-3. 启动 Tauri dev 应用。
-4. Tauri 退出后关闭 Vite dev server。
+1. 启动 Vite dev server。
+2. 启动 Tauri dev 应用。
+3. Tauri 退出后关闭 Vite dev server。
 
 如果直接双击或手动运行 debug 版 `src-tauri/target/debug/backup-tool.exe`，程序仍会尝试访问 `http://127.0.0.1:1420`。此时必须先运行 `just vite` 并保持该 PowerShell 窗口打开，否则界面会显示 `ERR_CONNECTION_REFUSED`。
 
@@ -172,10 +160,6 @@ pnpm.cmd --version
 ```
 
 本项目 `justfile` 已统一使用 `pnpm.cmd`，避免依赖 `pnpm.ps1`。
-
-### MSBuild 读取 Windows SDK 失败
-
-如果在受限沙箱或权限受限终端里看到类似 `C:\Users\<user>\AppData\Local\Microsoft SDKs` 访问被拒绝，通常不是项目代码问题，而是当前执行环境阻止 MSBuild 读取 Visual Studio/Windows SDK 配置。使用普通本机 PowerShell 或管理员 PowerShell 运行即可。
 
 ### release 程序为什么不显示终端
 
