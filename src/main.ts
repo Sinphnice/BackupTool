@@ -19,7 +19,6 @@ type BackupFilter = {
 };
 
 const result = required<HTMLParagraphElement>("#core-result");
-const testCore = required<HTMLButtonElement>("#test-core");
 const startBackup = required<HTMLButtonElement>("#start-backup");
 const startRestore = required<HTMLButtonElement>("#start-restore");
 
@@ -75,16 +74,6 @@ function collectFilter(): BackupFilter {
 function formatOperation(name: string, value: OperationResult): string {
   return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.`;
 }
-
-testCore.addEventListener("click", async () => {
-  result.textContent = "Calling Rust core...";
-
-  try {
-    result.textContent = await invoke<string>("core_version");
-  } catch (error) {
-    result.textContent = String(error);
-  }
-});
 
 startBackup.addEventListener("click", async () => {
   result.textContent = "Running backup...";

@@ -4,8 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CORE_VERSION: &str = "Backup Core 0.2.0 (Rust)";
-
 #[derive(Debug)]
 pub enum BackupError {
     EmptyPath(&'static str),
@@ -310,11 +308,6 @@ pub fn split_filter_list(value: Option<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn reports_core_version() {
-        assert_eq!(CORE_VERSION, "Backup Core 0.2.0 (Rust)");
-    }
 
     #[test]
     fn backs_up_and_restores_regular_files() {
