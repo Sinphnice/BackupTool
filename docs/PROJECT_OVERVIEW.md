@@ -12,7 +12,9 @@ TypeScript GUI
         -> Rust backup-core
 ```
 
-当前实现的是 legacy mirror backup，即“目录镜像备份”：把源目录中的普通文件按照相对路径复制到备份目录，再从备份目录恢复到目标目录。这个模式不是最终的仓库式备份格式，但它提供了一个可以运行、可以测试、可以演示的基础业务闭环。
+当前采用 repository backup：每次备份生成一个 snapshot manifest，普通文件内容保存到 object store，恢复时按用户指定的 snapshot id 还原目录结构和文件内容。
+
+早期 legacy mirror backup，也就是单纯目录复制形式的备份，已经从核心库、Tauri command 和测试中移除。当前 GUI 的备份/恢复按钮调用的是 repository backup / restore。
 
 当前已支持：
 
@@ -20,14 +22,18 @@ TypeScript GUI
 - 普通目录恢复。
 - 保留相对目录结构。
 - 自动创建目标目录。
-- 覆盖已有目标文件。
 - 路径、扩展名、文件名、修改时间、文件大小筛选。
+- 仓库目录初始化。
+- snapshot manifest 写入和读取。
+- object store 保存普通文件内容。
+- 按指定 snapshot 恢复普通文件和目录结构。
+- 备份后返回 snapshot id。
 - GUI 触发备份和恢复。
 - 核心库和 Tauri command 层自动化测试。
 
 尚未实现：
 
-- 仓库式备份、快照、manifest、object store。
+- snapshot 列表和选择界面。
 - 特殊文件处理和完整元数据恢复。
 - 打包、压缩、加密。
 - 定时备份、实时备份、网络备份。
@@ -55,7 +61,7 @@ BackupTool/
 | --- | --- | --- | --- |
 | GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 收集用户输入、调用 Tauri command、展示执行结果。 |
 | 桌面应用层 | `src-tauri/` | Rust, Tauri 2, serde | 提供桌面窗口、命令入口、DTO 转换、路径输入校验。 |
-| 核心业务层 | `crates/backup-core/` | Rust | 实现备份、恢复、筛选、错误模型和后续仓库式备份能力。 |
+| 核心业务层 | `crates/backup-core/` | Rust | 实现 repository、snapshot、manifest、object store、筛选和错误模型。 |
 | 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和打包。 |
 | 环境脚本 | `scripts/` | PowerShell | 检查并准备 Windows 开发依赖，或单独启动 Vite。 |
 
@@ -119,38 +125,7 @@ src/main.ts
 
 ## 5. 关键类型与关系
 
-当前核心库集中在 `crates/backup-core/src/lib.rs`，主要类型如下。
-
-备份配置与结果：
-
-```text
-BackupConfig
-├── source: PathBuf
-├── destination: PathBuf
-└── filter: BackupFilter
-
-BackupManager
-└── run(&BackupConfig) -> BackupCoreResult<BackupResult>
-
-BackupResult
-├── file_count: u64
-└── byte_count: u64
-```
-
-恢复配置与结果：
-
-```text
-RestoreConfig
-├── backup: PathBuf
-└── destination: PathBuf
-
-RestoreManager
-└── run(&RestoreConfig) -> BackupCoreResult<RestoreResult>
-
-RestoreResult
-├── file_count: u64
-└── byte_count: u64
-```
+当前核心业务集中在 `crates/backup-core/src/lib.rs` 和 `crates/backup-core/src/repository.rs`。
 
 筛选条件：
 
@@ -191,7 +166,39 @@ Tauri 命令层的 DTO 位于 `src-tauri/src/dto.rs`：
 TypeScript BackupFilter
     -> BackupFilterDto
         -> BackupFilter
-            -> BackupManager::run
+            -> RepositoryWriter::backup
+```
+
+仓库式备份类型：
+
+```text
+Repository
+├── init(root)
+├── open(root)
+├── writer() -> RepositoryWriter
+└── reader() -> RepositoryReader
+
+RepositoryWriter
+└── backup(source, filter) -> Snapshot
+
+RepositoryReader
+├── read_manifest(snapshot_id) -> Manifest
+└── restore(snapshot_id, destination)
+
+Manifest
+├── snapshot_id: SnapshotId
+└── entries: Vec<ManifestEntry>
+
+ManifestEntry
+├── relative_path: PathBuf
+├── kind: FileKind
+├── size: u64
+├── modified_unix_seconds: Option<i64>
+└── object_id: Option<ObjectId>
+
+ObjectStore
+├── write_object(bytes) -> ObjectId
+└── read_object(object_id) -> Vec<u8>
 ```
 
 ## 6. 当前业务流程
@@ -199,33 +206,32 @@ TypeScript BackupFilter
 备份流程：
 
 ```text
-用户填写源目录、备份目录、筛选条件
+用户填写源目录、repository 目录、筛选条件
     -> 前端收集表单
     -> invoke("backup")
     -> Tauri 反序列化 BackupFilterDto
-    -> commands::backup 构造 BackupConfig
-    -> BackupManager::run
-    -> copy_tree 遍历源目录
-    -> BackupFilter::allows 判断文件是否应复制
-    -> fs::copy 写入备份目录
+    -> commands::backup 打开或初始化 Repository
+    -> RepositoryWriter::backup
+    -> 遍历源目录
+    -> BackupFilter::allows 判断普通文件是否进入备份
+    -> 普通文件内容写入 object store
+    -> snapshots/<snapshot-id>.manifest 记录快照
     -> 返回 BackupResultDto
-    -> GUI 显示文件数和字节数
+    -> GUI 显示文件数、字节数和 snapshot id
 ```
 
 恢复流程：
 
 ```text
-用户填写备份目录和恢复目录
+用户填写 repository 目录、snapshot id 和恢复目录
     -> 前端调用 invoke("restore")
-    -> commands::restore 构造 RestoreConfig
-    -> RestoreManager::run
-    -> copy_tree 遍历备份目录
-    -> fs::copy 写入恢复目录
+    -> commands::restore 打开 Repository
+    -> RepositoryReader::read_manifest 读取指定 snapshot
+    -> RepositoryReader::restore
+    -> 按 manifest 创建目录并从 object store 读取文件内容
     -> 返回 RestoreResultDto
     -> GUI 显示文件数和字节数
 ```
-
-当前恢复不使用筛选条件。恢复动作会尽量还原备份目录中的普通文件和目录结构。
 
 ## 7. 环境配置
 
@@ -340,22 +346,20 @@ target/release/bundle/
 
 `backup-core` 测试覆盖：
 
-- 普通文件备份与恢复。
-- 空目录备份。
-- Unicode 和空格文件名。
-- 路径、文件名、扩展名、大小筛选。
-- 修改时间筛选。
-- 源路径不存在。
-- 源路径不是目录。
-- 恢复时创建缺失目标目录。
-- 备份覆盖已有文件。
 - 分号分隔筛选列表解析。
+- repository 目录结构创建。
+- snapshot manifest 写入和读取。
+- 连续备份生成不同 snapshot。
+- 按指定 snapshot 恢复不同历史版本。
+- repository 备份筛选。
+- 缺失 snapshot 错误。
 
 Tauri command 层测试覆盖：
 
 - `backup` command 调用核心库。
 - `restore` command 调用核心库。
 - 筛选 DTO 转换。
+- 备份结果返回 snapshot id。
 - 核心库错误转换为字符串。
 
 提交前建议至少运行：
@@ -369,7 +373,7 @@ just test
 
 ```text
 just check 通过
-just test 通过，13 个测试全部通过
+just test 通过，8 个测试全部通过
 ```
 
 ## 10. 开发方法
@@ -395,7 +399,7 @@ just test 通过，13 个测试全部通过
 
 ## 11. 后续设计方向
 
-后续规划以 `.agents/PLAN.md` 为准。当前重要方向是从 legacy mirror backup 演进为仓库式备份：
+后续规划以 `.agents/PLAN.md` 为准。当前已经完成第一版 repository/snapshot/manifest/object store，并已接入 Tauri command 和 GUI。下一步重点是围绕该模型继续扩展元数据、打包、压缩和加密：
 
 ```text
 Repository
@@ -406,7 +410,6 @@ Repository
 
 预期模块方向：
 
-- `legacy_mirror`：保留当前目录镜像备份能力。
 - `repository`：管理仓库、快照、manifest 和对象存储。
 - `filesystem`：隔离不同平台的文件系统差异。
 - `metadata`：记录时间、权限、属主和平台扩展元数据。
@@ -415,4 +418,4 @@ Repository
 - `encryption`：加密和解密。
 - `task`：进度、取消、异步任务和后续暂停/恢复。
 
-近期不应直接进入 GUI 美化或高级功能，而应优先稳定 repository、snapshot、manifest、object store 这些核心模型。
+近期不应直接进入 GUI 美化或高级功能，而应优先稳定 repository、snapshot、manifest、object store 这些核心模型，并补充 snapshot 列表、选择与错误提示等必要操作能力。

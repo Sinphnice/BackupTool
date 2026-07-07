@@ -4,6 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod repository;
+
+pub use repository::{
+    ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId, ObjectStore, Repository,
+    RepositoryReader, RepositoryWriter, Snapshot, SnapshotId,
+};
+
 #[derive(Debug)]
 pub enum BackupError {
     EmptyPath(&'static str),
@@ -11,6 +18,9 @@ pub enum BackupError {
     SourceIsNotDirectory(PathBuf),
     Io(std::io::Error),
     InvalidModifiedTime(PathBuf),
+    InvalidRepository(String),
+    InvalidManifest(String),
+    SnapshotDoesNotExist(String),
 }
 
 impl Display for BackupError {
@@ -31,6 +41,11 @@ impl Display for BackupError {
             Self::InvalidModifiedTime(path) => {
                 write!(formatter, "invalid modified time: {}", path.display())
             }
+            Self::InvalidRepository(message) => write!(formatter, "invalid repository: {message}"),
+            Self::InvalidManifest(message) => write!(formatter, "invalid manifest: {message}"),
+            Self::SnapshotDoesNotExist(snapshot_id) => {
+                write!(formatter, "snapshot does not exist: {snapshot_id}")
+            }
         }
     }
 }
@@ -45,7 +60,7 @@ impl From<std::io::Error> for BackupError {
 
 pub type BackupCoreResult<T> = Result<T, BackupError>;
 
-/// legacy 镜像备份流程使用的用户筛选条件。
+/// repository 备份流程使用的用户筛选条件。
 ///
 /// include 列表为空表示不过滤；exclude 规则一旦匹配，优先排除对应文件。
 #[derive(Debug, Clone, Default)]
@@ -133,144 +148,6 @@ impl BackupFilter {
     }
 }
 
-/// 将源目录复制到备份目录时使用的配置。
-#[derive(Debug, Clone)]
-pub struct BackupConfig {
-    pub source: PathBuf,
-    pub destination: PathBuf,
-    pub filter: BackupFilter,
-}
-
-/// 备份成功后返回的统计结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackupResult {
-    pub file_count: u64,
-    pub byte_count: u64,
-}
-
-/// 将 legacy 镜像备份恢复到目标目录时使用的配置。
-#[derive(Debug, Clone)]
-pub struct RestoreConfig {
-    pub backup: PathBuf,
-    pub destination: PathBuf,
-}
-
-/// 恢复成功后返回的统计结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RestoreResult {
-    pub file_count: u64,
-    pub byte_count: u64,
-}
-
-/// 执行普通文件和普通目录的 legacy 镜像备份流程。
-pub struct BackupManager;
-
-impl BackupManager {
-    pub fn run(&self, config: &BackupConfig) -> BackupCoreResult<BackupResult> {
-        copy_tree(
-            &config.source,
-            &config.destination,
-            Some(&config.filter),
-            "source",
-        )
-        .map(|copy| BackupResult {
-            file_count: copy.file_count,
-            byte_count: copy.byte_count,
-        })
-    }
-}
-
-/// 从 legacy 镜像备份目录恢复文件。
-pub struct RestoreManager;
-
-impl RestoreManager {
-    pub fn run(&self, config: &RestoreConfig) -> BackupCoreResult<RestoreResult> {
-        copy_tree(&config.backup, &config.destination, None, "backup").map(|copy| RestoreResult {
-            file_count: copy.file_count,
-            byte_count: copy.byte_count,
-        })
-    }
-}
-
-#[derive(Default)]
-struct CopyResult {
-    file_count: u64,
-    byte_count: u64,
-}
-
-fn copy_tree(
-    source: &Path,
-    destination: &Path,
-    filter: Option<&BackupFilter>,
-    source_name: &'static str,
-) -> BackupCoreResult<CopyResult> {
-    validate_source(source, source_name)?;
-    if destination.as_os_str().is_empty() {
-        return Err(BackupError::EmptyPath("destination"));
-    }
-
-    fs::create_dir_all(destination)?;
-    let mut result = CopyResult::default();
-    copy_children(source, source, destination, filter, &mut result)?;
-    Ok(result)
-}
-
-fn validate_source(source: &Path, source_name: &'static str) -> BackupCoreResult<()> {
-    if source.as_os_str().is_empty() {
-        return Err(BackupError::EmptyPath(source_name));
-    }
-    if !source.exists() {
-        return Err(BackupError::SourceDoesNotExist(source.to_path_buf()));
-    }
-    if !source.is_dir() {
-        return Err(BackupError::SourceIsNotDirectory(source.to_path_buf()));
-    }
-    Ok(())
-}
-
-fn copy_children(
-    root: &Path,
-    current: &Path,
-    destination: &Path,
-    filter: Option<&BackupFilter>,
-    result: &mut CopyResult,
-) -> BackupCoreResult<()> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let metadata = entry.metadata()?;
-        let relative = source_path
-            .strip_prefix(root)
-            .map_err(|_| BackupError::SourceDoesNotExist(root.to_path_buf()))?;
-        let target = destination.join(relative);
-
-        // 即使目录下的文件之后被筛选规则跳过，也保留源目录结构。
-        if metadata.is_dir() {
-            fs::create_dir_all(&target)?;
-            copy_children(root, &source_path, destination, filter, result)?;
-            continue;
-        }
-
-        if !metadata.is_file() {
-            continue;
-        }
-
-        if let Some(filter) = filter {
-            if !filter.allows(relative, &metadata)? {
-                continue;
-            }
-        }
-
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&source_path, &target)?;
-        result.file_count += 1;
-        result.byte_count += metadata.len();
-    }
-    Ok(())
-}
-
 fn normalize_path_text(path: &Path) -> String {
     // 统一使用平台无关的分隔符，使路径筛选在 Windows 和类 Unix 平台行为一致。
     path.components()
@@ -317,255 +194,4 @@ pub fn split_filter_list(value: Option<String>) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn backs_up_and_restores_regular_files() {
-        let root = TestDir::new("round_trip");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        let restore = root.path.join("restore");
-        fs::create_dir_all(source.join("dir")).unwrap();
-        fs::write(source.join("a.txt"), "alpha").unwrap();
-        fs::write(source.join("dir").join("b.txt"), "beta").unwrap();
-        fs::write(source.join("image.png"), [0_u8, 1, 2, 3]).unwrap();
-
-        let backup_result = BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup.clone(),
-                filter: BackupFilter::default(),
-            })
-            .unwrap();
-        assert_eq!(backup_result.file_count, 3);
-        assert_eq!(backup_result.byte_count, 13);
-
-        let restore_result = RestoreManager
-            .run(&RestoreConfig {
-                backup,
-                destination: restore.clone(),
-            })
-            .unwrap();
-        assert_eq!(restore_result.file_count, 3);
-        assert_eq!(fs::read_to_string(restore.join("a.txt")).unwrap(), "alpha");
-        assert_eq!(
-            fs::read_to_string(restore.join("dir").join("b.txt")).unwrap(),
-            "beta"
-        );
-        assert_eq!(fs::read(restore.join("image.png")).unwrap(), [0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn backs_up_empty_directory() {
-        let root = TestDir::new("empty");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        fs::create_dir_all(&source).unwrap();
-
-        let result = BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup.clone(),
-                filter: BackupFilter::default(),
-            })
-            .unwrap();
-
-        assert_eq!(result.file_count, 0);
-        assert!(backup.exists());
-    }
-
-    #[test]
-    fn supports_unicode_and_space_file_names() {
-        let root = TestDir::new("unicode");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("含 空格.txt"), "text").unwrap();
-
-        BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup.clone(),
-                filter: BackupFilter::default(),
-            })
-            .unwrap();
-
-        assert_eq!(
-            fs::read_to_string(backup.join("含 空格.txt")).unwrap(),
-            "text"
-        );
-    }
-
-    #[test]
-    fn applies_path_name_extension_and_size_filters() {
-        let root = TestDir::new("filters");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        fs::create_dir_all(source.join("docs")).unwrap();
-        fs::create_dir_all(source.join("tmp")).unwrap();
-        fs::write(source.join("docs").join("keep-report.txt"), "12345").unwrap();
-        fs::write(source.join("docs").join("skip.bin"), "12345").unwrap();
-        fs::write(source.join("tmp").join("keep-report.txt"), "12345").unwrap();
-        fs::write(source.join("docs").join("keep-small.txt"), "1").unwrap();
-
-        let result = BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup.clone(),
-                filter: BackupFilter {
-                    include_path_contains: vec!["docs".to_string()],
-                    exclude_path_contains: vec!["tmp".to_string()],
-                    extensions: vec!["txt".to_string()],
-                    include_name_contains: vec!["keep".to_string()],
-                    exclude_name_contains: vec!["small".to_string()],
-                    min_size: Some(2),
-                    max_size: Some(10),
-                    modified_after: None,
-                    modified_before: None,
-                },
-            })
-            .unwrap();
-
-        assert_eq!(result.file_count, 1);
-        assert!(backup.join("docs").join("keep-report.txt").exists());
-        assert!(!backup.join("docs").join("skip.bin").exists());
-        assert!(!backup.join("tmp").join("keep-report.txt").exists());
-        assert!(!backup.join("docs").join("keep-small.txt").exists());
-    }
-
-    #[test]
-    fn applies_modified_time_filter() {
-        let root = TestDir::new("time_filter");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("now.txt"), "now").unwrap();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let result = BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup,
-                filter: BackupFilter {
-                    modified_after: Some(now - 60),
-                    modified_before: Some(now + 60),
-                    ..BackupFilter::default()
-                },
-            })
-            .unwrap();
-
-        assert_eq!(result.file_count, 1);
-    }
-
-    #[test]
-    fn errors_when_source_does_not_exist() {
-        let root = TestDir::new("missing");
-        let error = BackupManager
-            .run(&BackupConfig {
-                source: root.path.join("missing"),
-                destination: root.path.join("backup"),
-                filter: BackupFilter::default(),
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, BackupError::SourceDoesNotExist(_)));
-    }
-
-    #[test]
-    fn errors_when_source_is_not_directory() {
-        let root = TestDir::new("file_source");
-        let source = root.path.join("source.txt");
-        fs::write(&source, "text").unwrap();
-
-        let error = BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: root.path.join("backup"),
-                filter: BackupFilter::default(),
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, BackupError::SourceIsNotDirectory(_)));
-    }
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "backup_core_{name}_{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
-    #[test]
-    fn helper_splits_semicolon_lists() {
-        assert_eq!(
-            split_filter_list(Some("txt; png ; ;md".to_string())),
-            vec!["txt", "png", "md"]
-        );
-    }
-
-    #[test]
-    fn restore_creates_missing_destination_parent_tree() {
-        let root = TestDir::new("restore_parent");
-        let backup = root.path.join("backup");
-        let destination = root.path.join("nested").join("restore");
-        fs::create_dir_all(&backup).unwrap();
-        fs::write(backup.join("a.txt"), "a").unwrap();
-
-        RestoreManager
-            .run(&RestoreConfig {
-                backup,
-                destination: destination.clone(),
-            })
-            .unwrap();
-
-        assert_eq!(fs::read_to_string(destination.join("a.txt")).unwrap(), "a");
-    }
-
-    #[test]
-    fn backup_overwrites_existing_files() {
-        let root = TestDir::new("overwrite");
-        let source = root.path.join("source");
-        let backup = root.path.join("backup");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&backup).unwrap();
-        fs::write(source.join("a.txt"), "new").unwrap();
-        let mut existing = fs::File::create(backup.join("a.txt")).unwrap();
-        existing.write_all(b"old").unwrap();
-        drop(existing);
-
-        BackupManager
-            .run(&BackupConfig {
-                source,
-                destination: backup.clone(),
-                filter: BackupFilter::default(),
-            })
-            .unwrap();
-
-        assert_eq!(fs::read_to_string(backup.join("a.txt")).unwrap(), "new");
-    }
 }

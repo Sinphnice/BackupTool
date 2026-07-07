@@ -4,6 +4,7 @@ import "./styles.css";
 type OperationResult = {
   fileCount: number;
   byteCount: number;
+  snapshotId?: string;
 };
 
 type BackupFilter = {
@@ -74,7 +75,8 @@ function collectFilter(): BackupFilter {
 }
 
 function formatOperation(name: string, value: OperationResult): string {
-  return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.`;
+  const snapshot = value.snapshotId ? ` Snapshot: ${value.snapshotId}.` : "";
+  return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.${snapshot}`;
 }
 
 startBackup.addEventListener("click", async () => {
@@ -98,6 +100,7 @@ startRestore.addEventListener("click", async () => {
   try {
     const value = await invoke<OperationResult>("restore", {
       backupPath: inputValue("#restore-backup"),
+      snapshotId: inputValue("#restore-snapshot"),
       destination: inputValue("#restore-destination"),
     });
     result.textContent = formatOperation("Restore", value);

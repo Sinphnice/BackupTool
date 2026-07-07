@@ -24,6 +24,7 @@ pub(crate) struct BackupFilterDto {
 pub(crate) struct BackupResultDto {
     pub(crate) file_count: u64,
     pub(crate) byte_count: u64,
+    pub(crate) snapshot_id: String,
 }
 
 /// 恢复完成后返回给 GUI 的稳定命令响应结构。

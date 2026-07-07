@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(test)]
+mod commands_tests;
 mod dto;
 
 /// 桌面端和移动端共用的 Tauri 应用入口。

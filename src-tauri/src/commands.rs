@@ -1,47 +1,93 @@
 use crate::dto::{BackupFilterDto, BackupResultDto, RestoreResultDto};
-use backup_core::{BackupConfig, BackupManager, RestoreConfig, RestoreManager};
-use std::path::PathBuf;
+use backup_core::{BackupError, FileKind, Manifest, Repository, SnapshotId};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-/// 从 GUI 命令层启动一次同步 legacy 镜像备份。
+/// 从 GUI 命令层启动一次同步 repository 备份。
 ///
-/// 这一层只负责校验和转换 Tauri DTO，实际备份行为全部交给 `backup-core`。
+/// 这一层只负责校验和转换 Tauri DTO，实际 repository 备份行为全部交给 `backup-core`。
 #[tauri::command]
 pub(crate) fn backup(
     source: String,
     destination: String,
     filter: Option<BackupFilterDto>,
 ) -> Result<BackupResultDto, String> {
-    let result = BackupManager
-        .run(&BackupConfig {
-            source: path_from_input(source, "source")?,
-            destination: path_from_input(destination, "destination")?,
-            filter: filter.map(Into::into).unwrap_or_default(),
-        })
+    let source = path_from_input(source, "source")?;
+    ensure_source_directory(&source)?;
+    let repository_path = path_from_input(destination, "repository")?;
+    let repository = open_or_init_repository(repository_path)?;
+    let filter = filter.map(Into::into).unwrap_or_default();
+    let snapshot = repository
+        .writer()
+        .backup(source, &filter)
         .map_err(|error| error.to_string())?;
+    let manifest = repository
+        .reader()
+        .read_manifest(&snapshot.id)
+        .map_err(|error| error.to_string())?;
+    let summary = summarize_manifest(&manifest);
 
     Ok(BackupResultDto {
-        file_count: result.file_count,
-        byte_count: result.byte_count,
+        file_count: summary.file_count,
+        byte_count: summary.byte_count,
+        snapshot_id: snapshot.id.as_str().to_string(),
     })
 }
 
-/// 将 legacy 镜像备份目录恢复到目标目录。
+/// 将 repository 中的指定 snapshot 恢复到目标目录。
 #[tauri::command]
 pub(crate) fn restore(
     backup_path: String,
+    snapshot_id: String,
     destination: String,
 ) -> Result<RestoreResultDto, String> {
-    let result = RestoreManager
-        .run(&RestoreConfig {
-            backup: path_from_input(backup_path, "backup")?,
-            destination: path_from_input(destination, "destination")?,
-        })
+    let snapshot_id = snapshot_id_from_input(snapshot_id)?;
+    let repository = Repository::open(path_from_input(backup_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    let manifest = repository
+        .reader()
+        .read_manifest(&snapshot_id)
+        .map_err(|error| error.to_string())?;
+    let summary = summarize_manifest(&manifest);
+    repository
+        .reader()
+        .restore(&snapshot_id, path_from_input(destination, "destination")?)
         .map_err(|error| error.to_string())?;
 
     Ok(RestoreResultDto {
-        file_count: result.file_count,
-        byte_count: result.byte_count,
+        file_count: summary.file_count,
+        byte_count: summary.byte_count,
     })
+}
+
+fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
+    if path.join("repo.meta").is_file() {
+        return Repository::open(path).map_err(|error| error.to_string());
+    }
+
+    if path.exists()
+        && fs::read_dir(&path)
+            .map_err(|error| error.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err(format!(
+            "repository path exists but is not a BackupTool repository: {}",
+            path.display()
+        ));
+    }
+
+    Repository::init(path).map_err(|error| error.to_string())
+}
+
+fn ensure_source_directory(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(BackupError::SourceDoesNotExist(path.to_path_buf()).to_string());
+    }
+    if !path.is_dir() {
+        return Err(BackupError::SourceIsNotDirectory(path.to_path_buf()).to_string());
+    }
+    Ok(())
 }
 
 fn path_from_input(value: String, name: &'static str) -> Result<PathBuf, String> {
@@ -54,116 +100,27 @@ fn path_from_input(value: String, name: &'static str) -> Result<PathBuf, String>
     Ok(PathBuf::from(trimmed))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{backup, restore};
-    use crate::dto::BackupFilterDto;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn backup_and_restore_round_trip_regular_files() {
-        let root = TestDir::new("tauri_round_trip");
-        let source = root.path.join("source");
-        let backup_dir = root.path.join("backup");
-        let restore_dir = root.path.join("restore");
-        fs::create_dir_all(source.join("dir")).unwrap();
-        fs::write(source.join("a.txt"), "alpha").unwrap();
-        fs::write(source.join("dir").join("b.txt"), "beta").unwrap();
-        fs::write(source.join("image.png"), [0_u8, 1, 2, 3]).unwrap();
-
-        let backup_result = backup(
-            source.to_string_lossy().into_owned(),
-            backup_dir.to_string_lossy().into_owned(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(backup_result.file_count, 3);
-
-        let restore_result = restore(
-            backup_dir.to_string_lossy().into_owned(),
-            restore_dir.to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        assert_eq!(restore_result.file_count, 3);
-        assert_eq!(
-            fs::read_to_string(restore_dir.join("a.txt")).unwrap(),
-            "alpha"
-        );
-        assert_eq!(
-            fs::read_to_string(restore_dir.join("dir").join("b.txt")).unwrap(),
-            "beta"
-        );
-        assert_eq!(
-            fs::read(restore_dir.join("image.png")).unwrap(),
-            [0, 1, 2, 3]
-        );
+fn snapshot_id_from_input(value: String) -> Result<SnapshotId, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("snapshot id must not be empty".to_string());
     }
+    Ok(SnapshotId::from(trimmed.to_string()))
+}
 
-    #[test]
-    fn backup_applies_extension_filter() {
-        let root = TestDir::new("tauri_filter");
-        let source = root.path.join("source");
-        let backup_dir = root.path.join("backup");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("keep.txt"), "keep").unwrap();
-        fs::write(source.join("skip.png"), "skip").unwrap();
+#[derive(Default)]
+struct OperationSummary {
+    file_count: u64,
+    byte_count: u64,
+}
 
-        let result = backup(
-            source.to_string_lossy().into_owned(),
-            backup_dir.to_string_lossy().into_owned(),
-            Some(BackupFilterDto {
-                include_path_contains: None,
-                exclude_path_contains: None,
-                extensions: Some("txt".to_string()),
-                include_name_contains: None,
-                exclude_name_contains: None,
-                min_size: None,
-                max_size: None,
-                modified_after: None,
-                modified_before: None,
-            }),
-        )
-        .unwrap();
-
-        assert_eq!(result.file_count, 1);
-        assert!(backup_dir.join("keep.txt").exists());
-        assert!(!backup_dir.join("skip.png").exists());
-    }
-
-    #[test]
-    fn backup_returns_core_error_as_string() {
-        let error = backup(
-            "Z:\\definitely\\missing\\backup-tool-source".to_string(),
-            "unused".to_string(),
-            None,
-        )
-        .unwrap_err();
-
-        assert!(error.contains("source path does not exist"));
-    }
-
-    struct TestDir {
-        path: std::path::PathBuf,
-    }
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "backup_tool_{name}_{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
+fn summarize_manifest(manifest: &Manifest) -> OperationSummary {
+    let mut summary = OperationSummary::default();
+    for entry in &manifest.entries {
+        if entry.kind == FileKind::File {
+            summary.file_count += 1;
+            summary.byte_count += entry.size;
         }
     }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    summary
 }
