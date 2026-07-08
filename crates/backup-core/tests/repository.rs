@@ -1,7 +1,9 @@
-use backup_core::{BackupFilter, FileKind, Repository, SnapshotId};
+use backup_core::{
+    BackupFilter, FileKind, Repository, RestoreOptions, RestoreStrategy, SnapshotId,
+};
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn creates_repository_layout_and_snapshot_manifest() {
@@ -128,6 +130,113 @@ fn missing_snapshot_returns_error() {
     assert!(error.is_snapshot_missing());
 }
 
+#[test]
+fn best_effort_restore_preserves_file_modified_time_and_readonly_attribute() {
+    let root = TestDir::new("repo_metadata_best_effort");
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    let source_file = source.join("readonly.txt");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(&source_file, "metadata").unwrap();
+    let expected_modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_modified_time(&source_file, expected_modified);
+    set_readonly(&source_file, true);
+
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let report = repository
+        .reader()
+        .restore_with_options(&snapshot.id, &restore, RestoreOptions::default())
+        .unwrap();
+
+    let restored_file = restore.join("readonly.txt");
+    assert!(report.warnings.is_empty());
+    assert_eq!(fs::read_to_string(&restored_file).unwrap(), "metadata");
+    assert!(fs::metadata(&restored_file)
+        .unwrap()
+        .permissions()
+        .readonly());
+    let restored_modified = fs::metadata(&restored_file)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(restored_modified, 1_700_000_000);
+
+    set_readonly(&source_file, false);
+    set_readonly(&restored_file, false);
+}
+
+#[test]
+fn data_only_restore_skips_file_metadata() {
+    let root = TestDir::new("repo_metadata_data_only");
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    let source_file = source.join("readonly.txt");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(&source_file, "metadata").unwrap();
+    set_readonly(&source_file, true);
+
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let report = repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                strategy: RestoreStrategy::DataOnly,
+            },
+        )
+        .unwrap();
+
+    let restored_file = restore.join("readonly.txt");
+    assert!(report.warnings.is_empty());
+    assert_eq!(fs::read_to_string(&restored_file).unwrap(), "metadata");
+    assert!(!fs::metadata(&restored_file)
+        .unwrap()
+        .permissions()
+        .readonly());
+
+    set_readonly(&source_file, false);
+}
+
+#[test]
+fn strict_restore_succeeds_when_recorded_metadata_is_supported() {
+    let root = TestDir::new("repo_metadata_strict");
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let report = repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                strategy: RestoreStrategy::Strict,
+            },
+        )
+        .unwrap();
+
+    assert!(report.warnings.is_empty());
+    assert_eq!(fs::read_to_string(restore.join("a.txt")).unwrap(), "alpha");
+}
+
 struct TestDir {
     path: PathBuf,
 }
@@ -160,4 +269,20 @@ impl SnapshotDoesNotExistExt for backup_core::BackupError {
     fn is_snapshot_missing(&self) -> bool {
         matches!(self, backup_core::BackupError::SnapshotDoesNotExist(_))
     }
+}
+
+fn set_modified_time(path: &std::path::Path, modified: SystemTime) {
+    let times = fs::FileTimes::new().set_modified(modified);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+}
+
+fn set_readonly(path: &std::path::Path, readonly: bool) {
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(readonly);
+    fs::set_permissions(path, permissions).unwrap();
 }

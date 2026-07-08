@@ -1,6 +1,10 @@
+use crate::filesystem::{
+    BasicFileSystemProvider, FileEntry, FileSystemProvider, FileSystemWriter, Metadata,
+    PlatformMetadata, RestoreOptions, RestoreReport,
+};
 use crate::{BackupCoreResult, BackupError, BackupFilter};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,30 +46,7 @@ pub struct Snapshot {
     pub id: SnapshotId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
-    Directory,
-    File,
-}
-
-impl FileKind {
-    fn as_manifest_value(self) -> &'static str {
-        match self {
-            Self::Directory => "dir",
-            Self::File => "file",
-        }
-    }
-
-    fn from_manifest_value(value: &str) -> BackupCoreResult<Self> {
-        match value {
-            "dir" => Ok(Self::Directory),
-            "file" => Ok(Self::File),
-            _ => Err(BackupError::InvalidManifest(format!(
-                "unknown file kind: {value}"
-            ))),
-        }
-    }
-}
+pub use crate::filesystem::FileType as FileKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -74,6 +55,7 @@ pub struct ManifestEntry {
     pub size: u64,
     pub modified_unix_seconds: Option<i64>,
     pub object_id: Option<ObjectId>,
+    pub metadata: Metadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,9 +190,16 @@ impl RepositoryWriter {
             snapshot_id: snapshot_id.clone(),
             entries: Vec::new(),
         };
+        let provider = BasicFileSystemProvider;
         let object_store = self.repository.object_store();
-
-        scan_into_manifest(source, source, filter, &object_store, &mut manifest)?;
+        scan_into_manifest(
+            source,
+            source,
+            filter,
+            &provider,
+            &object_store,
+            &mut manifest,
+        )?;
         write_manifest(&self.repository.manifest_path(&snapshot_id), &manifest)?;
 
         Ok(Snapshot { id: snapshot_id })
@@ -259,6 +248,16 @@ impl RepositoryReader {
         snapshot_id: &SnapshotId,
         destination: impl AsRef<Path>,
     ) -> BackupCoreResult<()> {
+        self.restore_with_options(snapshot_id, destination, RestoreOptions::default())
+            .map(|_| ())
+    }
+
+    pub fn restore_with_options(
+        &self,
+        snapshot_id: &SnapshotId,
+        destination: impl AsRef<Path>,
+        options: RestoreOptions,
+    ) -> BackupCoreResult<RestoreReport> {
         let destination = destination.as_ref();
         if destination.as_os_str().is_empty() {
             return Err(BackupError::EmptyPath("destination"));
@@ -266,28 +265,56 @@ impl RepositoryReader {
 
         let manifest = self.read_manifest(snapshot_id)?;
         let object_store = self.repository.object_store();
+        let writer = BasicFileSystemProvider;
+        let mut report = RestoreReport::default();
         fs::create_dir_all(destination)?;
 
         for entry in manifest.entries {
             let target = destination.join(&entry.relative_path);
             match entry.kind {
-                FileKind::Directory => fs::create_dir_all(target)?,
+                FileKind::Directory => {
+                    writer.create_directory(&target)?;
+                    report.warnings.extend(writer.restore_metadata(
+                        &target,
+                        &entry.to_file_entry(),
+                        options.strategy,
+                    )?);
+                }
                 FileKind::File => {
-                    if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    let object_id = entry.object_id.ok_or_else(|| {
+                    let object_id = entry.object_id.as_ref().ok_or_else(|| {
                         BackupError::InvalidManifest(format!(
                             "file entry missing object id: {}",
                             entry.relative_path.display()
                         ))
                     })?;
-                    fs::write(target, object_store.read_object(&object_id)?)?;
+                    writer.write_file(&target, &object_store.read_object(&object_id)?)?;
+                    report.warnings.extend(writer.restore_metadata(
+                        &target,
+                        &entry.to_file_entry(),
+                        options.strategy,
+                    )?);
+                }
+                FileKind::Symlink | FileKind::Other => {
+                    report.warnings.extend(writer.handle_unsupported_entry(
+                        &target,
+                        &entry.to_file_entry(),
+                        options.strategy,
+                    )?);
                 }
             }
         }
 
-        Ok(())
+        Ok(report)
+    }
+}
+
+impl ManifestEntry {
+    fn to_file_entry(&self) -> FileEntry {
+        FileEntry {
+            relative_path: self.relative_path.clone(),
+            file_type: self.kind,
+            metadata: self.metadata.clone(),
+        }
     }
 }
 
@@ -308,48 +335,64 @@ fn scan_into_manifest(
     root: &Path,
     current: &Path,
     filter: &BackupFilter,
+    provider: &impl FileSystemProvider,
     object_store: &ObjectStore,
     manifest: &mut Manifest,
 ) -> BackupCoreResult<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
-        let metadata = entry.metadata()?;
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| BackupError::SourceDoesNotExist(root.to_path_buf()))?
-            .to_path_buf();
+        let file_entry = provider.read_entry(root, &path)?;
 
-        if metadata.is_dir() {
-            manifest.entries.push(ManifestEntry {
-                relative_path: relative.clone(),
-                kind: FileKind::Directory,
-                size: 0,
-                modified_unix_seconds: modified_unix_seconds(&metadata),
-                object_id: None,
-            });
-            scan_into_manifest(root, &path, filter, object_store, manifest)?;
+        if file_entry.file_type == FileKind::Directory {
+            manifest
+                .entries
+                .push(ManifestEntry::from_file_entry(file_entry.clone(), None));
+            scan_into_manifest(root, &path, filter, provider, object_store, manifest)?;
             continue;
         }
 
-        if !metadata.is_file() || !filter.allows(&relative, &metadata)? {
+        if file_entry.file_type == FileKind::Symlink || file_entry.file_type == FileKind::Other {
+            manifest
+                .entries
+                .push(ManifestEntry::from_file_entry(file_entry, None));
             continue;
         }
 
-        let mut bytes = Vec::new();
-        fs::File::open(&path)?.read_to_end(&mut bytes)?;
+        let metadata = fs::metadata(&path)?;
+        if file_entry.file_type != FileKind::File
+            || !filter.allows(&file_entry.relative_path, &metadata)?
+        {
+            continue;
+        }
+
+        let bytes = provider.read_file(&path)?;
         let object_id = object_store.write_object(&bytes)?;
 
-        manifest.entries.push(ManifestEntry {
-            relative_path: relative,
-            kind: FileKind::File,
-            size: metadata.len(),
-            modified_unix_seconds: modified_unix_seconds(&metadata),
-            object_id: Some(object_id),
-        });
+        manifest.push_entry(file_entry, Some(object_id));
     }
 
     Ok(())
+}
+
+impl Manifest {
+    fn push_entry(&mut self, file_entry: FileEntry, object_id: Option<ObjectId>) {
+        self.entries
+            .push(ManifestEntry::from_file_entry(file_entry, object_id));
+    }
+}
+
+impl ManifestEntry {
+    fn from_file_entry(file_entry: FileEntry, object_id: Option<ObjectId>) -> Self {
+        Self {
+            relative_path: file_entry.relative_path,
+            kind: file_entry.file_type,
+            size: file_entry.metadata.size,
+            modified_unix_seconds: file_entry.metadata.modified_unix_seconds,
+            object_id,
+            metadata: file_entry.metadata,
+        }
+    }
 }
 
 fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
@@ -382,6 +425,26 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
         if let Some(object_id) = &entry.object_id {
             output.push_str(object_id.as_str());
         }
+        output.push('\t');
+        output.push_str(
+            &entry
+                .metadata
+                .accessed_unix_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        output.push('\t');
+        output.push_str(
+            &entry
+                .metadata
+                .created_unix_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        output.push('\t');
+        output.push_str(if entry.metadata.readonly { "1" } else { "0" });
+        output.push('\t');
+        output.push_str(platform_manifest_value(&entry.metadata.platform));
         output.push('\n');
     }
 
@@ -414,7 +477,7 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
     let mut entries = Vec::new();
     for line in lines {
         let parts = line.split('\t').collect::<Vec<_>>();
-        if parts.len() != 6 || parts[0] != "entry" {
+        if parts.len() != 6 && parts.len() != 10 || parts[0] != "entry" {
             return Err(BackupError::InvalidManifest(format!(
                 "invalid entry line: {line}"
             )));
@@ -437,6 +500,10 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
         } else {
             Some(ObjectId(parts[5].to_string()))
         };
+        let accessed_unix_seconds = parse_optional_i64(parts.get(6).copied().unwrap_or(""))?;
+        let created_unix_seconds = parse_optional_i64(parts.get(7).copied().unwrap_or(""))?;
+        let readonly = parse_readonly(parts.get(8).copied().unwrap_or(""))?;
+        let platform = parse_platform_metadata(parts.get(9).copied().unwrap_or(""))?;
 
         entries.push(ManifestEntry {
             relative_path,
@@ -444,6 +511,14 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
             size,
             modified_unix_seconds,
             object_id,
+            metadata: Metadata {
+                size,
+                modified_unix_seconds,
+                accessed_unix_seconds,
+                created_unix_seconds,
+                readonly,
+                platform,
+            },
         });
     }
 
@@ -451,14 +526,6 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
         snapshot_id,
         entries,
     })
-}
-
-fn modified_unix_seconds(metadata: &fs::Metadata) -> Option<i64> {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
 fn escape_field(value: &str) -> String {
@@ -473,6 +540,59 @@ fn escape_field(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn parse_optional_i64(value: &str) -> BackupCoreResult<Option<i64>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| BackupError::InvalidManifest(format!("invalid integer: {value}")))
+    }
+}
+
+fn parse_readonly(value: &str) -> BackupCoreResult<bool> {
+    match value {
+        "" | "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(BackupError::InvalidManifest(format!(
+            "invalid readonly value: {value}"
+        ))),
+    }
+}
+
+fn platform_manifest_value(platform: &PlatformMetadata) -> &'static str {
+    match platform {
+        PlatformMetadata::Basic => "basic",
+        PlatformMetadata::Windows(_) => "windows",
+        PlatformMetadata::Posix(_) => "posix",
+    }
+}
+
+fn parse_platform_metadata(value: &str) -> BackupCoreResult<PlatformMetadata> {
+    match value {
+        "" | "basic" => Ok(PlatformMetadata::Basic),
+        "windows" => Ok(PlatformMetadata::Windows(
+            crate::filesystem::WindowsMetadata {
+                file_attributes: None,
+                is_symlink: false,
+                is_reparse_point: false,
+            },
+        )),
+        "posix" => Ok(PlatformMetadata::Posix(crate::filesystem::PosixMetadata {
+            mode: None,
+            uid: None,
+            gid: None,
+            is_symlink: false,
+            is_fifo: false,
+            is_device: false,
+        })),
+        _ => Err(BackupError::InvalidManifest(format!(
+            "invalid platform metadata: {value}"
+        ))),
+    }
 }
 
 fn unescape_field(value: &str) -> BackupCoreResult<String> {

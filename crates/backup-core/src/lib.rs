@@ -4,8 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod filesystem;
 pub mod repository;
 
+pub use filesystem::{
+    BasicFileSystemProvider, FileEntry, FileSystemProvider, FileSystemWriter, FileType, Metadata,
+    PlatformMetadata, PosixFileSystemProvider, PosixMetadata, RestoreOptions, RestoreReport,
+    RestoreStrategy, RestoreWarning, WindowsFileSystemProvider, WindowsMetadata,
+};
 pub use repository::{
     ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId, ObjectStore, Repository,
     RepositoryReader, RepositoryWriter, Snapshot, SnapshotId,
@@ -21,6 +27,8 @@ pub enum BackupError {
     InvalidRepository(String),
     InvalidManifest(String),
     SnapshotDoesNotExist(String),
+    UnsupportedFileType { path: PathBuf, file_type: String },
+    MetadataRestore { path: PathBuf, message: String },
 }
 
 impl Display for BackupError {
@@ -45,6 +53,20 @@ impl Display for BackupError {
             Self::InvalidManifest(message) => write!(formatter, "invalid manifest: {message}"),
             Self::SnapshotDoesNotExist(snapshot_id) => {
                 write!(formatter, "snapshot does not exist: {snapshot_id}")
+            }
+            Self::UnsupportedFileType { path, file_type } => {
+                write!(
+                    formatter,
+                    "unsupported file type during strict restore: {} ({file_type})",
+                    path.display()
+                )
+            }
+            Self::MetadataRestore { path, message } => {
+                write!(
+                    formatter,
+                    "failed to restore metadata for {}: {message}",
+                    path.display()
+                )
             }
         }
     }
