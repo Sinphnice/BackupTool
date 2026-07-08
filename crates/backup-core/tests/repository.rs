@@ -90,7 +90,7 @@ fn consecutive_backups_create_restorable_snapshots() {
 }
 
 #[test]
-fn multi_source_backup_restores_under_source_slots_by_default() {
+fn multi_source_backup_restores_under_source_root_names_by_default() {
     let root = TestDir::new("repo_multi_source_relative");
     let repository = Repository::init(root.path.join("repository")).unwrap();
     let source_a = root.path.join("alpha");
@@ -111,11 +111,96 @@ fn multi_source_backup_restores_under_source_slots_by_default() {
     repository.reader().restore(&snapshot.id, &restore).unwrap();
 
     assert_eq!(
-        fs::read_to_string(restore.join("source-0").join("docs").join("a.txt")).unwrap(),
+        fs::read_to_string(restore.join("alpha").join("docs").join("a.txt")).unwrap(),
         "alpha"
     );
     assert_eq!(
-        fs::read_to_string(restore.join("source-1").join("b.txt")).unwrap(),
+        fs::read_to_string(restore.join("beta").join("b.txt")).unwrap(),
+        "beta"
+    );
+}
+
+#[test]
+fn relative_source_root_conflict_error_fails() {
+    let (_root, repository, snapshot, restore) = duplicate_source_root_snapshot("repo_root_error");
+
+    let error = repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                flatten_conflict_strategy: FlattenConflictStrategy::Error,
+                ..RestoreOptions::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, backup_core::BackupError::PathConflict(_)));
+}
+
+#[test]
+fn relative_source_root_conflict_skip_omits_later_source() {
+    let (_root, repository, snapshot, restore) = duplicate_source_root_snapshot("repo_root_skip");
+
+    repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                flatten_conflict_strategy: FlattenConflictStrategy::Skip,
+                ..RestoreOptions::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(restore.join("data").join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert!(!restore.join("data").join("b.txt").exists());
+}
+
+#[test]
+fn relative_source_root_conflict_overwrite_merges_same_root() {
+    let (_root, repository, snapshot, restore) =
+        duplicate_source_root_snapshot("repo_root_overwrite");
+
+    repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                flatten_conflict_strategy: FlattenConflictStrategy::Overwrite,
+                ..RestoreOptions::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(restore.join("data").join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        fs::read_to_string(restore.join("data").join("b.txt")).unwrap(),
+        "beta"
+    );
+}
+
+#[test]
+fn relative_source_root_conflict_rename_keeps_all_sources() {
+    let (_root, repository, snapshot, restore) = duplicate_source_root_snapshot("repo_root_rename");
+
+    repository.reader().restore(&snapshot.id, &restore).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(restore.join("data").join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        fs::read_to_string(restore.join("data (1)").join("b.txt")).unwrap(),
         "beta"
     );
 }
@@ -514,6 +599,26 @@ fn duplicate_name_snapshot(name: &str) -> (TestDir, Repository, backup_core::Sna
     fs::create_dir_all(&source_b).unwrap();
     fs::write(source_a.join("same.txt"), "alpha").unwrap();
     fs::write(source_b.join("same.txt"), "beta").unwrap();
+
+    let snapshot = repository
+        .writer()
+        .backup_many([&source_a, &source_b], &BackupFilter::default())
+        .unwrap();
+    (root, repository, snapshot, restore)
+}
+
+fn duplicate_source_root_snapshot(
+    name: &str,
+) -> (TestDir, Repository, backup_core::Snapshot, PathBuf) {
+    let root = TestDir::new(name);
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source_a = root.path.join("alpha").join("data");
+    let source_b = root.path.join("beta").join("data");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source_a).unwrap();
+    fs::create_dir_all(&source_b).unwrap();
+    fs::write(source_a.join("a.txt"), "alpha").unwrap();
+    fs::write(source_b.join("b.txt"), "beta").unwrap();
 
     let snapshot = repository
         .writer()

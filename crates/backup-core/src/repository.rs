@@ -62,6 +62,7 @@ pub struct SnapshotInfo {
 pub struct SourceInfo {
     pub index: usize,
     pub absolute_path: PathBuf,
+    pub restore_root: PathBuf,
 }
 
 pub use crate::filesystem::FileType as FileKind;
@@ -221,6 +222,7 @@ impl RepositoryWriter {
                 .map(|(index, source)| SourceInfo {
                     index,
                     absolute_path: source.clone(),
+                    restore_root: default_restore_root(source),
                 })
                 .collect(),
             entries: Vec::new(),
@@ -428,10 +430,15 @@ impl RepositoryReader {
         let writer = AutoFileSystemProvider::for_path(destination);
         let mut report = RestoreReport::default();
         let is_multi_source = manifest.sources.len() > 1;
+        let source_roots = resolve_source_roots(&manifest, &options)?;
         fs::create_dir_all(destination)?;
 
         for entry in &manifest.entries {
-            let target = restore_target_path(destination, &manifest, &entry, &options)?;
+            let Some(target) =
+                restore_target_path(destination, &manifest, &source_roots, entry, &options)?
+            else {
+                continue;
+            };
             match entry.kind {
                 FileKind::Directory => {
                     if options.path_strategy != RestorePathStrategy::Flatten {
@@ -601,17 +608,25 @@ impl ManifestEntry {
 fn restore_target_path(
     destination: &Path,
     manifest: &Manifest,
+    source_roots: &[Option<PathBuf>],
     entry: &ManifestEntry,
     options: &RestoreOptions,
-) -> BackupCoreResult<PathBuf> {
+) -> BackupCoreResult<Option<PathBuf>> {
     match options.path_strategy {
         RestorePathStrategy::PreserveRelativePath => {
             if manifest.sources.len() > 1 {
-                Ok(destination
-                    .join(format!("source-{}", entry.source_index))
-                    .join(&entry.relative_path))
+                let root = source_roots.get(entry.source_index).ok_or_else(|| {
+                    BackupError::InvalidManifest(format!(
+                        "missing restore root for source index: {}",
+                        entry.source_index
+                    ))
+                })?;
+                let Some(root) = root.as_ref() else {
+                    return Ok(None);
+                };
+                Ok(Some(destination.join(root).join(&entry.relative_path)))
             } else {
-                Ok(destination.join(&entry.relative_path))
+                Ok(Some(destination.join(&entry.relative_path)))
             }
         }
         RestorePathStrategy::PreserveFullPath => {
@@ -625,13 +640,15 @@ fn restore_target_path(
                         entry.source_index
                     ))
                 })?;
-            Ok(destination
-                .join(safe_full_path(&source.absolute_path))
-                .join(&entry.relative_path))
+            Ok(Some(
+                destination
+                    .join(safe_full_path(&source.absolute_path))
+                    .join(&entry.relative_path),
+            ))
         }
         RestorePathStrategy::Flatten => {
             if entry.kind == FileKind::Directory {
-                return Ok(destination.to_path_buf());
+                return Ok(Some(destination.to_path_buf()));
             }
             let name = entry.relative_path.file_name().ok_or_else(|| {
                 BackupError::InvalidManifest(format!(
@@ -639,9 +656,97 @@ fn restore_target_path(
                     entry.relative_path.display()
                 ))
             })?;
-            Ok(destination.join(name))
+            Ok(Some(destination.join(name)))
         }
     }
+}
+
+fn resolve_source_roots(
+    manifest: &Manifest,
+    options: &RestoreOptions,
+) -> BackupCoreResult<Vec<Option<PathBuf>>> {
+    let mut roots = vec![None; manifest.sources.len()];
+    if options.path_strategy != RestorePathStrategy::PreserveRelativePath
+        || manifest.sources.len() <= 1
+    {
+        return Ok(roots);
+    }
+
+    let mut used = HashSet::new();
+    for source in &manifest.sources {
+        let mut candidate = source.restore_root.clone();
+        if candidate.as_os_str().is_empty() {
+            candidate = default_restore_root(&source.absolute_path);
+        }
+
+        let key = comparable_path(&candidate);
+        let resolved = if used.insert(key) {
+            Some(candidate)
+        } else {
+            match options.flatten_conflict_strategy {
+                FlattenConflictStrategy::Error => {
+                    return Err(BackupError::PathConflict(candidate));
+                }
+                FlattenConflictStrategy::Skip => None,
+                FlattenConflictStrategy::Overwrite => Some(candidate),
+                FlattenConflictStrategy::Rename => {
+                    let renamed = renamed_source_root(&candidate, &mut used);
+                    Some(renamed)
+                }
+            }
+        };
+
+        if source.index >= roots.len() {
+            return Err(BackupError::InvalidManifest(format!(
+                "source index out of range: {}",
+                source.index
+            )));
+        }
+        roots[source.index] = resolved;
+    }
+
+    Ok(roots)
+}
+
+fn renamed_source_root(root: &Path, used: &mut HashSet<String>) -> PathBuf {
+    let text = root.to_string_lossy();
+    for index in 1..10_000 {
+        let candidate = PathBuf::from(format!("{text} ({index})"));
+        if used.insert(comparable_path(&candidate)) {
+            return candidate;
+        }
+    }
+    PathBuf::from(format!("{text} (9999)"))
+}
+
+fn default_restore_root(source: &Path) -> PathBuf {
+    if let Some(name) = source.file_name() {
+        return PathBuf::from(sanitize_component(name));
+    }
+
+    for component in source.components() {
+        if let Component::Prefix(prefix) = component {
+            return prefix_restore_root(prefix.as_os_str());
+        }
+    }
+
+    PathBuf::from("root")
+}
+
+fn prefix_restore_root(value: &std::ffi::OsStr) -> PathBuf {
+    let text = value.to_string_lossy();
+    if text.starts_with(r"\\") {
+        let parts = text
+            .trim_start_matches('\\')
+            .split('\\')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if parts.len() >= 2 {
+            return PathBuf::from(sanitize_component(format!("{}_{}", parts[0], parts[1])));
+        }
+        return PathBuf::from("UNC");
+    }
+    PathBuf::from(sanitize_component(text.trim_end_matches(':')))
 }
 
 fn safe_full_path(path: &Path) -> PathBuf {
@@ -739,6 +844,8 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
         output.push_str(&source.index.to_string());
         output.push('\t');
         output.push_str(&escape_field(&source.absolute_path.to_string_lossy()));
+        output.push('\t');
+        output.push_str(&escape_field(&source.restore_root.to_string_lossy()));
         output.push('\n');
     }
 
@@ -817,16 +924,23 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
         let parts = line.split('\t').collect::<Vec<_>>();
         match parts.first().copied() {
             Some("source") => {
-                if parts.len() != 3 {
+                if parts.len() != 3 && parts.len() != 4 {
                     return Err(BackupError::InvalidManifest(format!(
                         "invalid source line: {line}"
                     )));
                 }
+                let absolute_path = PathBuf::from(unescape_field(parts[2])?);
+                let restore_root = if parts.len() == 4 {
+                    PathBuf::from(unescape_field(parts[3])?)
+                } else {
+                    default_restore_root(&absolute_path)
+                };
                 sources.push(SourceInfo {
                     index: parts[1].parse::<usize>().map_err(|_| {
                         BackupError::InvalidManifest(format!("invalid source index: {}", parts[1]))
                     })?,
-                    absolute_path: PathBuf::from(unescape_field(parts[2])?),
+                    absolute_path,
+                    restore_root,
                 });
             }
             Some("entry") => entries.push(parse_entry_line(&parts, line)?),
@@ -842,6 +956,7 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
         sources.push(SourceInfo {
             index: 0,
             absolute_path: PathBuf::from("source-0"),
+            restore_root: PathBuf::from("source-0"),
         });
     }
 
