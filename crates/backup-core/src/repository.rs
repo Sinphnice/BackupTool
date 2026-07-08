@@ -1,5 +1,5 @@
 use crate::filesystem::{
-    BasicFileSystemProvider, FileEntry, FileSystemProvider, FileSystemWriter, Metadata,
+    AutoFileSystemProvider, FileEntry, FileSystemProvider, FileSystemWriter, Metadata,
     PlatformMetadata, RestoreOptions, RestoreReport,
 };
 use crate::{BackupCoreResult, BackupError, BackupFilter};
@@ -190,7 +190,7 @@ impl RepositoryWriter {
             snapshot_id: snapshot_id.clone(),
             entries: Vec::new(),
         };
-        let provider = BasicFileSystemProvider;
+        let provider = AutoFileSystemProvider::for_path(source);
         let object_store = self.repository.object_store();
         scan_into_manifest(
             source,
@@ -265,7 +265,7 @@ impl RepositoryReader {
 
         let manifest = self.read_manifest(snapshot_id)?;
         let object_store = self.repository.object_store();
-        let writer = BasicFileSystemProvider;
+        let writer = AutoFileSystemProvider::for_path(destination);
         let mut report = RestoreReport::default();
         fs::create_dir_all(destination)?;
 

@@ -31,7 +31,7 @@ build: frontend-build
     .\node_modules\.bin\tauri.cmd build
 
 run: build
-    .\src-tauri\target\release\backup-tool.exe
+    .\target\release\backup-tool.exe
 
 clean:
     Remove-Item -Recurse -Force dist, src-tauri/target, target -ErrorAction SilentlyContinue

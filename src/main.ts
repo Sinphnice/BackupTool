@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 type OperationResult = {
@@ -22,6 +23,7 @@ type BackupFilter = {
 const result = required<HTMLParagraphElement>("#core-result");
 const startBackup = required<HTMLButtonElement>("#start-backup");
 const startRestore = required<HTMLButtonElement>("#start-restore");
+const browseButtons = document.querySelectorAll<HTMLButtonElement>(".browse-button");
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -78,6 +80,34 @@ function formatOperation(name: string, value: OperationResult): string {
   const snapshot = value.snapshotId ? ` Snapshot: ${value.snapshotId}.` : "";
   return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.${snapshot}`;
 }
+
+async function chooseDirectory(targetId: string): Promise<void> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+  });
+
+  if (typeof selected !== "string") {
+    return;
+  }
+
+  required<HTMLInputElement>(`#${targetId}`).value = selected;
+}
+
+browseButtons.forEach((button) => {
+  button.addEventListener("click", async () => {
+    const targetId = button.dataset.target;
+    if (!targetId) {
+      return;
+    }
+
+    try {
+      await chooseDirectory(targetId);
+    } catch (error) {
+      result.textContent = String(error);
+    }
+  });
+});
 
 startBackup.addEventListener("click", async () => {
   result.textContent = "Running backup...";

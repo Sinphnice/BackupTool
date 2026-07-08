@@ -8,9 +8,10 @@ pub mod filesystem;
 pub mod repository;
 
 pub use filesystem::{
-    BasicFileSystemProvider, FileEntry, FileSystemProvider, FileSystemWriter, FileType, Metadata,
-    PlatformMetadata, PosixFileSystemProvider, PosixMetadata, RestoreOptions, RestoreReport,
-    RestoreStrategy, RestoreWarning, WindowsFileSystemProvider, WindowsMetadata,
+    AutoFileSystemProvider, BasicFileSystemProvider, FileEntry, FileSystemProvider,
+    FileSystemWriter, FileType, Metadata, PlatformMetadata, PosixFileSystemProvider, PosixMetadata,
+    ProviderKind, RestoreOptions, RestoreReport, RestoreStrategy, RestoreWarning,
+    WindowsFileSystemProvider, WindowsMetadata,
 };
 pub use repository::{
     ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId, ObjectStore, Repository,

@@ -77,6 +77,12 @@ input:focus {
   outline: 2px solid #bfdbfe;
 }
 
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -99,6 +105,10 @@ button {
   cursor: pointer;
 }
 
+.browse-button {
+  min-width: 88px;
+}
+
 button:hover {
   background: #eef2f7;
 }
@@ -116,6 +126,10 @@ p {
   }
 
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .path-row {
     grid-template-columns: 1fr;
   }
 }

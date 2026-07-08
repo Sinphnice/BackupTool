@@ -174,6 +174,106 @@ impl FileSystemWriter for BasicFileSystemProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Basic,
+    Windows,
+    Posix,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AutoFileSystemProvider {
+    kind: ProviderKind,
+}
+
+impl AutoFileSystemProvider {
+    pub fn for_path(path: &Path) -> Self {
+        Self {
+            kind: ProviderKind::from_path(path),
+        }
+    }
+
+    pub fn kind(&self) -> ProviderKind {
+        self.kind
+    }
+}
+
+impl ProviderKind {
+    pub fn from_path(path: &Path) -> Self {
+        classify_path(path)
+    }
+}
+
+impl FileSystemProvider for AutoFileSystemProvider {
+    fn read_entry(&self, root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.read_entry(root, path),
+            ProviderKind::Windows => WindowsFileSystemProvider.read_entry(root, path),
+            ProviderKind::Posix => PosixFileSystemProvider.read_entry(root, path),
+        }
+    }
+
+    fn read_file(&self, path: &Path) -> BackupCoreResult<Vec<u8>> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.read_file(path),
+            ProviderKind::Windows => WindowsFileSystemProvider.read_file(path),
+            ProviderKind::Posix => PosixFileSystemProvider.read_file(path),
+        }
+    }
+}
+
+impl FileSystemWriter for AutoFileSystemProvider {
+    fn create_directory(&self, path: &Path) -> BackupCoreResult<()> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.create_directory(path),
+            ProviderKind::Windows => WindowsFileSystemProvider.create_directory(path),
+            ProviderKind::Posix => PosixFileSystemProvider.create_directory(path),
+        }
+    }
+
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> BackupCoreResult<()> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.write_file(path, bytes),
+            ProviderKind::Windows => WindowsFileSystemProvider.write_file(path, bytes),
+            ProviderKind::Posix => PosixFileSystemProvider.write_file(path, bytes),
+        }
+    }
+
+    fn restore_metadata(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+        strategy: RestoreStrategy,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.restore_metadata(path, entry, strategy),
+            ProviderKind::Windows => {
+                WindowsFileSystemProvider.restore_metadata(path, entry, strategy)
+            }
+            ProviderKind::Posix => PosixFileSystemProvider.restore_metadata(path, entry, strategy),
+        }
+    }
+
+    fn handle_unsupported_entry(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+        strategy: RestoreStrategy,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
+        match self.kind {
+            ProviderKind::Basic => {
+                BasicFileSystemProvider.handle_unsupported_entry(path, entry, strategy)
+            }
+            ProviderKind::Windows => {
+                WindowsFileSystemProvider.handle_unsupported_entry(path, entry, strategy)
+            }
+            ProviderKind::Posix => {
+                PosixFileSystemProvider.handle_unsupported_entry(path, entry, strategy)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WindowsFileSystemProvider;
 
@@ -292,6 +392,34 @@ fn read_entry_with_platform(
             platform,
         },
     })
+}
+
+#[cfg(windows)]
+fn classify_path(path: &Path) -> ProviderKind {
+    let text = path.to_string_lossy().replace('/', "\\").to_lowercase();
+    if text.starts_with("\\\\wsl$\\") || text.starts_with("\\\\wsl.localhost\\") {
+        ProviderKind::Posix
+    } else if has_windows_drive_prefix(&text) || text.starts_with("\\\\") {
+        ProviderKind::Windows
+    } else {
+        ProviderKind::Basic
+    }
+}
+
+#[cfg(windows)]
+fn has_windows_drive_prefix(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
+#[cfg(unix)]
+fn classify_path(_path: &Path) -> ProviderKind {
+    ProviderKind::Posix
+}
+
+#[cfg(not(any(windows, unix)))]
+fn classify_path(_path: &Path) -> ProviderKind {
+    ProviderKind::Basic
 }
 
 fn detect_file_type(metadata: &fs::Metadata) -> FileType {
@@ -455,5 +583,54 @@ fn unix_seconds_to_system_time(value: i64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(value as u64)
     } else {
         UNIX_EPOCH - Duration::from_secs(value.unsigned_abs())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderKind, RestoreOptions, RestoreStrategy};
+    use std::path::Path;
+
+    #[test]
+    fn restore_options_default_to_best_effort() {
+        assert_eq!(
+            RestoreOptions::default().strategy,
+            RestoreStrategy::BestEffort
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_select_windows_provider() {
+        assert_eq!(
+            ProviderKind::from_path(Path::new(r"C:\Users\l\data")),
+            ProviderKind::Windows
+        );
+        assert_eq!(
+            ProviderKind::from_path(Path::new(r"\\server\share\data")),
+            ProviderKind::Windows
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_paths_select_posix_provider() {
+        assert_eq!(
+            ProviderKind::from_path(Path::new(r"\\wsl.localhost\Ubuntu\home\l\data")),
+            ProviderKind::Posix
+        );
+        assert_eq!(
+            ProviderKind::from_path(Path::new(r"\\wsl$\Ubuntu\home\l\data")),
+            ProviderKind::Posix
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_paths_select_posix_provider() {
+        assert_eq!(
+            ProviderKind::from_path(Path::new("/tmp/data")),
+            ProviderKind::Posix
+        );
     }
 }

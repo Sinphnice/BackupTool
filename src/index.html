@@ -15,11 +15,21 @@
         <h2>Backup</h2>
         <label>
           Source directory
-          <input id="backup-source" type="text" autocomplete="off" />
+          <span class="path-row">
+            <input id="backup-source" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="backup-source">
+              Browse
+            </button>
+          </span>
         </label>
         <label>
           Repository directory
-          <input id="backup-destination" type="text" autocomplete="off" />
+          <span class="path-row">
+            <input id="backup-destination" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="backup-destination">
+              Browse
+            </button>
+          </span>
         </label>
         <div class="actions">
           <button id="start-backup" type="button">Start Backup</button>
@@ -72,7 +82,12 @@
         <h2>Restore</h2>
         <label>
           Repository directory
-          <input id="restore-backup" type="text" autocomplete="off" />
+          <span class="path-row">
+            <input id="restore-backup" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="restore-backup">
+              Browse
+            </button>
+          </span>
         </label>
         <label>
           Snapshot ID
@@ -80,7 +95,12 @@
         </label>
         <label>
           Restore directory
-          <input id="restore-destination" type="text" autocomplete="off" />
+          <span class="path-row">
+            <input id="restore-destination" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="restore-destination">
+              Browse
+            </button>
+          </span>
         </label>
         <div class="actions">
           <button id="start-restore" type="button">Start Restore</button>
