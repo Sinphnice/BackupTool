@@ -10,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::backup,
+            commands::list_snapshots,
             commands::restore
         ])
         .run(tauri::generate_context!())

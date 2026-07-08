@@ -9,13 +9,13 @@ pub mod repository;
 
 pub use filesystem::{
     AutoFileSystemProvider, BasicFileSystemProvider, FileEntry, FileSystemProvider,
-    FileSystemWriter, FileType, Metadata, PlatformMetadata, PosixFileSystemProvider, PosixMetadata,
-    ProviderKind, RestoreOptions, RestoreReport, RestoreStrategy, RestoreWarning,
-    WindowsFileSystemProvider, WindowsMetadata,
+    FileSystemWriter, FileType, FlattenConflictStrategy, Metadata, PlatformMetadata,
+    PosixFileSystemProvider, PosixMetadata, ProviderKind, RestoreOptions, RestorePathStrategy,
+    RestoreReport, RestoreStrategy, RestoreWarning, WindowsFileSystemProvider, WindowsMetadata,
 };
 pub use repository::{
     ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId, ObjectStore, Repository,
-    RepositoryReader, RepositoryWriter, Snapshot, SnapshotId,
+    RepositoryReader, RepositoryWriter, Snapshot, SnapshotId, SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]
@@ -28,6 +28,9 @@ pub enum BackupError {
     InvalidRepository(String),
     InvalidManifest(String),
     SnapshotDoesNotExist(String),
+    EmptySources,
+    PathConflict(PathBuf),
+    SkipFile(PathBuf),
     UnsupportedFileType { path: PathBuf, file_type: String },
     MetadataRestore { path: PathBuf, message: String },
 }
@@ -55,6 +58,11 @@ impl Display for BackupError {
             Self::SnapshotDoesNotExist(snapshot_id) => {
                 write!(formatter, "snapshot does not exist: {snapshot_id}")
             }
+            Self::EmptySources => write!(formatter, "at least one source path is required"),
+            Self::PathConflict(path) => {
+                write!(formatter, "restore path conflict: {}", path.display())
+            }
+            Self::SkipFile(path) => write!(formatter, "skip file: {}", path.display()),
             Self::UnsupportedFileType { path, file_type } => {
                 write!(
                     formatter,

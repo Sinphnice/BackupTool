@@ -1,5 +1,5 @@
-use crate::commands::{backup, restore};
-use crate::dto::BackupFilterDto;
+use crate::commands::{backup, list_snapshots, restore};
+use crate::dto::{BackupFilterDto, FlattenConflictStrategyDto, RestorePathStrategyDto};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +15,7 @@ fn backup_and_restore_round_trip_regular_files() {
     fs::write(source.join("image.png"), [0_u8, 1, 2, 3]).unwrap();
 
     let backup_result = backup(
-        source.to_string_lossy().into_owned(),
+        vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         None,
     )
@@ -27,6 +27,8 @@ fn backup_and_restore_round_trip_regular_files() {
         repository_dir.to_string_lossy().into_owned(),
         backup_result.snapshot_id,
         restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(restore_result.file_count, 3);
@@ -55,7 +57,7 @@ fn backup_applies_extension_filter() {
     fs::write(source.join("skip.png"), "skip").unwrap();
 
     let result = backup(
-        source.to_string_lossy().into_owned(),
+        vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         Some(BackupFilterDto {
             include_path_contains: None,
@@ -76,6 +78,8 @@ fn backup_applies_extension_filter() {
         repository_dir.to_string_lossy().into_owned(),
         result.snapshot_id,
         restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
     )
     .unwrap();
     assert!(restore_dir.join("keep.txt").exists());
@@ -83,9 +87,41 @@ fn backup_applies_extension_filter() {
 }
 
 #[test]
+fn list_snapshots_returns_repository_snapshot_summaries() {
+    let root = TestDir::new("tauri_list_snapshots");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let first = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+    fs::write(source.join("b.txt"), "beta").unwrap();
+    let second = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+
+    let snapshots = list_snapshots(repository_dir.to_string_lossy().into_owned()).unwrap();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].id, second.snapshot_id);
+    assert_eq!(snapshots[0].file_count, 2);
+    assert_eq!(snapshots[0].byte_count, 9);
+    assert!(snapshots[0].created_unix_seconds.is_some());
+    assert_eq!(snapshots[1].id, first.snapshot_id);
+}
+
+#[test]
 fn backup_returns_core_error_as_string() {
     let error = backup(
-        "Z:\\definitely\\missing\\backup-tool-source".to_string(),
+        vec!["Z:\\definitely\\missing\\backup-tool-source".to_string()],
         "unused".to_string(),
         None,
     )
@@ -105,7 +141,7 @@ fn backup_rejects_non_empty_non_repository_destination() {
     fs::write(destination.join("legacy.txt"), "legacy").unwrap();
 
     let error = backup(
-        source.to_string_lossy().into_owned(),
+        vec![source.to_string_lossy().into_owned()],
         destination.to_string_lossy().into_owned(),
         None,
     )
@@ -119,9 +155,59 @@ fn backup_rejects_non_empty_non_repository_destination() {
 
 #[test]
 fn restore_requires_snapshot_id() {
-    let error = restore("unused".to_string(), " ".to_string(), "unused".to_string()).unwrap_err();
+    let error = restore(
+        "unused".to_string(),
+        " ".to_string(),
+        "unused".to_string(),
+        None,
+        None,
+    )
+    .unwrap_err();
 
     assert!(error.contains("snapshot id must not be empty"));
+}
+
+#[test]
+fn backup_requires_at_least_one_source() {
+    let error = backup(Vec::new(), "unused".to_string(), None).unwrap_err();
+
+    assert!(error.contains("at least one source path is required"));
+}
+
+#[test]
+fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
+    let root = TestDir::new("tauri_multi_source");
+    let source_a = root.path.join("alpha");
+    let source_b = root.path.join("beta");
+    let repository_dir = root.path.join("repository");
+    let restore_dir = root.path.join("restore");
+    fs::create_dir_all(&source_a).unwrap();
+    fs::create_dir_all(&source_b).unwrap();
+    fs::write(source_a.join("same.txt"), "alpha").unwrap();
+    fs::write(source_b.join("same.txt"), "beta").unwrap();
+
+    let backup_result = backup(
+        vec![
+            source_a.to_string_lossy().into_owned(),
+            source_b.to_string_lossy().into_owned(),
+        ],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(backup_result.file_count, 2);
+
+    restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        restore_dir.to_string_lossy().into_owned(),
+        Some(RestorePathStrategyDto::Flatten),
+        Some(FlattenConflictStrategyDto::Rename),
+    )
+    .unwrap();
+
+    assert!(restore_dir.join("same.txt").exists());
+    assert!(restore_dir.join("same (1).txt").exists());
 }
 
 struct TestDir {

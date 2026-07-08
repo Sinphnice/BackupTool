@@ -105,14 +105,45 @@ pub enum RestoreStrategy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestorePathStrategy {
+    PreserveFullPath,
+    PreserveRelativePath,
+    Flatten,
+}
+
+impl Default for RestorePathStrategy {
+    fn default() -> Self {
+        Self::PreserveRelativePath
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlattenConflictStrategy {
+    Error,
+    Skip,
+    Overwrite,
+    Rename,
+}
+
+impl Default for FlattenConflictStrategy {
+    fn default() -> Self {
+        Self::Rename
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreOptions {
     pub strategy: RestoreStrategy,
+    pub path_strategy: RestorePathStrategy,
+    pub flatten_conflict_strategy: FlattenConflictStrategy,
 }
 
 impl Default for RestoreOptions {
     fn default() -> Self {
         Self {
             strategy: RestoreStrategy::BestEffort,
+            path_strategy: RestorePathStrategy::PreserveRelativePath,
+            flatten_conflict_strategy: FlattenConflictStrategy::Rename,
         }
     }
 }

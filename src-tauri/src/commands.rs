@@ -1,5 +1,8 @@
-use crate::dto::{BackupFilterDto, BackupResultDto, RestoreResultDto};
-use backup_core::{BackupError, FileKind, Manifest, Repository, SnapshotId};
+use crate::dto::{
+    BackupFilterDto, BackupResultDto, FlattenConflictStrategyDto, RestorePathStrategyDto,
+    RestoreResultDto, SnapshotInfoDto,
+};
+use backup_core::{BackupError, FileKind, Manifest, Repository, RestoreOptions, SnapshotId};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,18 +11,20 @@ use std::path::{Path, PathBuf};
 /// 这一层只负责校验和转换 Tauri DTO，实际 repository 备份行为全部交给 `backup-core`。
 #[tauri::command]
 pub(crate) fn backup(
-    source: String,
+    sources: Vec<String>,
     destination: String,
     filter: Option<BackupFilterDto>,
 ) -> Result<BackupResultDto, String> {
-    let source = path_from_input(source, "source")?;
-    ensure_source_directory(&source)?;
+    let sources = paths_from_input(sources, "source")?;
+    for source in &sources {
+        ensure_source_directory(source)?;
+    }
     let repository_path = path_from_input(destination, "repository")?;
     let repository = open_or_init_repository(repository_path)?;
     let filter = filter.map(Into::into).unwrap_or_default();
     let snapshot = repository
         .writer()
-        .backup(source, &filter)
+        .backup_many(sources, &filter)
         .map_err(|error| error.to_string())?;
     let manifest = repository
         .reader()
@@ -31,6 +36,11 @@ pub(crate) fn backup(
         file_count: summary.file_count,
         byte_count: summary.byte_count,
         snapshot_id: snapshot.id.as_str().to_string(),
+        ignored_sources: snapshot
+            .ignored_sources
+            .iter()
+            .map(|source| source.display().to_string())
+            .collect(),
     })
 }
 
@@ -40,6 +50,8 @@ pub(crate) fn restore(
     backup_path: String,
     snapshot_id: String,
     destination: String,
+    path_strategy: Option<RestorePathStrategyDto>,
+    flatten_conflict_strategy: Option<FlattenConflictStrategyDto>,
 ) -> Result<RestoreResultDto, String> {
     let snapshot_id = snapshot_id_from_input(snapshot_id)?;
     let repository = Repository::open(path_from_input(backup_path, "repository")?)
@@ -49,15 +61,38 @@ pub(crate) fn restore(
         .read_manifest(&snapshot_id)
         .map_err(|error| error.to_string())?;
     let summary = summarize_manifest(&manifest);
+    let mut options = RestoreOptions::default();
+    if let Some(path_strategy) = path_strategy {
+        options.path_strategy = path_strategy.into();
+    }
+    if let Some(flatten_conflict_strategy) = flatten_conflict_strategy {
+        options.flatten_conflict_strategy = flatten_conflict_strategy.into();
+    }
     repository
         .reader()
-        .restore(&snapshot_id, path_from_input(destination, "destination")?)
+        .restore_with_options(
+            &snapshot_id,
+            path_from_input(destination, "destination")?,
+            options,
+        )
         .map_err(|error| error.to_string())?;
 
     Ok(RestoreResultDto {
         file_count: summary.file_count,
         byte_count: summary.byte_count,
     })
+}
+
+/// 读取 repository 中可恢复的 snapshot 摘要，供 GUI 展示和选择。
+#[tauri::command]
+pub(crate) fn list_snapshots(repository_path: String) -> Result<Vec<SnapshotInfoDto>, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .reader()
+        .list_snapshots()
+        .map(|snapshots| snapshots.into_iter().map(Into::into).collect())
+        .map_err(|error| error.to_string())
 }
 
 fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
@@ -98,6 +133,16 @@ fn path_from_input(value: String, name: &'static str) -> Result<PathBuf, String>
         return Err(format!("{name} path must not be empty"));
     }
     Ok(PathBuf::from(trimmed))
+}
+
+fn paths_from_input(values: Vec<String>, name: &'static str) -> Result<Vec<PathBuf>, String> {
+    if values.is_empty() {
+        return Err(format!("at least one {name} path is required"));
+    }
+    values
+        .into_iter()
+        .map(|value| path_from_input(value, name))
+        .collect()
 }
 
 fn snapshot_id_from_input(value: String) -> Result<SnapshotId, String> {

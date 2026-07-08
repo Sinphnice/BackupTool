@@ -14,12 +14,10 @@
       <section>
         <h2>Backup</h2>
         <label>
-          Source directory
+          Source directories
           <span class="path-row">
-            <input id="backup-source" type="text" autocomplete="off" />
-            <button type="button" class="browse-button" data-target="backup-source">
-              Browse
-            </button>
+            <div id="source-list" class="source-list"></div>
+            <button id="add-source" type="button" class="browse-button">Add</button>
           </span>
         </label>
         <label>
@@ -80,18 +78,32 @@
 
       <section>
         <h2>Restore</h2>
+        <div class="repository-row">
+          <span id="current-repository">No repository opened</span>
+          <button id="open-repository" type="button" class="browse-button">Open Repository</button>
+        </div>
         <label>
-          Repository directory
-          <span class="path-row">
-            <input id="restore-backup" type="text" autocomplete="off" />
-            <button type="button" class="browse-button" data-target="restore-backup">
-              Browse
-            </button>
-          </span>
+          Available snapshots
+          <select id="snapshot-list">
+            <option value="">Open a repository first</option>
+          </select>
         </label>
         <label>
-          Snapshot ID
-          <input id="restore-snapshot" type="text" autocomplete="off" />
+          Restore path strategy
+          <select id="restore-path-strategy">
+            <option value="preserveRelativePath" selected>Preserve Relative Path</option>
+            <option value="preserveFullPath">Preserve Full Path</option>
+            <option value="flatten">Flatten</option>
+          </select>
+        </label>
+        <label id="flatten-conflict-row">
+          Flatten conflict strategy
+          <select id="flatten-conflict-strategy">
+            <option value="rename" selected>Rename</option>
+            <option value="error">Error</option>
+            <option value="skip">Skip</option>
+            <option value="overwrite">Overwrite</option>
+          </select>
         </label>
         <label>
           Restore directory

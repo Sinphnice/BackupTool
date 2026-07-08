@@ -60,7 +60,8 @@ label {
   color: #475467;
 }
 
-input {
+input,
+select {
   box-sizing: border-box;
   width: 100%;
   min-height: 36px;
@@ -72,7 +73,8 @@ input {
   font: inherit;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: #2563eb;
   outline: 2px solid #bfdbfe;
 }
@@ -81,6 +83,68 @@ input:focus {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
+}
+
+.repository-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+#current-repository {
+  overflow: hidden;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid #d3d8e0;
+  border-radius: 6px;
+  color: #475467;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-list {
+  display: grid;
+  min-height: 36px;
+  border: 1px solid #d3d8e0;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.source-empty,
+.source-row {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.source-empty {
+  color: #667085;
+}
+
+.source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-row button {
+  min-width: 72px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.source-row:hover button,
+.source-row:focus button,
+.source-row:focus-within button {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .grid {
@@ -130,6 +194,10 @@ p {
   }
 
   .path-row {
+    grid-template-columns: 1fr;
+  }
+
+  .repository-row {
     grid-template-columns: 1fr;
   }
 }
