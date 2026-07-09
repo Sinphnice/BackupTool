@@ -1,8 +1,10 @@
 use crate::dto::{
-    BackupFilterDto, BackupResultDto, FlattenConflictStrategyDto, RestorePathStrategyDto,
-    RestoreResultDto, SnapshotInfoDto,
+    ArchiveResultDto, BackupFilterDto, BackupResultDto, FlattenConflictStrategyDto,
+    RestorePathStrategyDto, RestoreResultDto, SnapshotInfoDto,
 };
-use backup_core::{BackupError, FileKind, Manifest, Repository, RestoreOptions, SnapshotId};
+use backup_core::{
+    ArchiveAlgorithm, BackupError, FileKind, Manifest, Repository, RestoreOptions, SnapshotId,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -95,6 +97,43 @@ pub(crate) fn list_snapshots(repository_path: String) -> Result<Vec<SnapshotInfo
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub(crate) fn export_repository(
+    repository_path: String,
+    archive_path: String,
+    algorithm: Option<String>,
+) -> Result<ArchiveResultDto, String> {
+    let algorithm = archive_algorithm_from_input(algorithm)?;
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .export_archive(path_from_input(archive_path, "archive")?, algorithm)
+        .map(Into::into)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn import_repository(
+    archive_path: String,
+    destination: String,
+    algorithm: Option<String>,
+) -> Result<ArchiveResultDto, String> {
+    let algorithm = archive_algorithm_from_input(algorithm)?;
+    let archive_path = path_from_input(archive_path, "archive")?;
+    let destination = path_from_input(destination, "repository")?;
+    let repository = Repository::import_archive(&archive_path, &destination, algorithm)
+        .map_err(|error| error.to_string())?;
+    let byte_count = fs::metadata(&archive_path)
+        .map_err(|error| error.to_string())?
+        .len();
+
+    Ok(ArchiveResultDto {
+        algorithm: archive_algorithm_name(algorithm).to_string(),
+        path: repository.root().display().to_string(),
+        byte_count,
+    })
+}
+
 fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
     if path.join("repo.meta").is_file() {
         return Repository::open(path).map_err(|error| error.to_string());
@@ -151,6 +190,20 @@ fn snapshot_id_from_input(value: String) -> Result<SnapshotId, String> {
         return Err("snapshot id must not be empty".to_string());
     }
     Ok(SnapshotId::from(trimmed.to_string()))
+}
+
+fn archive_algorithm_from_input(value: Option<String>) -> Result<ArchiveAlgorithm, String> {
+    let value = value.unwrap_or_else(|| "tar".to_string());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "tar" => Ok(ArchiveAlgorithm::Tar),
+        other => Err(format!("unsupported archive algorithm: {other}")),
+    }
+}
+
+fn archive_algorithm_name(value: ArchiveAlgorithm) -> &'static str {
+    match value {
+        ArchiveAlgorithm::Tar => "tar",
+    }
 }
 
 #[derive(Default)]

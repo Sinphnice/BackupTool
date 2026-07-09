@@ -14,8 +14,9 @@ pub use filesystem::{
     RestoreReport, RestoreStrategy, RestoreWarning, WindowsFileSystemProvider, WindowsMetadata,
 };
 pub use repository::{
-    ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId, ObjectStore, Repository,
-    RepositoryReader, RepositoryWriter, Snapshot, SnapshotId, SnapshotInfo, SourceInfo,
+    ArchiveAlgorithm, ArchiveResult, ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId,
+    ObjectStore, Repository, RepositoryReader, RepositoryWriter, Snapshot, SnapshotId,
+    SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]
@@ -31,6 +32,7 @@ pub enum BackupError {
     EmptySources,
     PathConflict(PathBuf),
     SkipFile(PathBuf),
+    InvalidArchive(String),
     UnsupportedFileType { path: PathBuf, file_type: String },
     MetadataRestore { path: PathBuf, message: String },
 }
@@ -63,6 +65,7 @@ impl Display for BackupError {
                 write!(formatter, "restore path conflict: {}", path.display())
             }
             Self::SkipFile(path) => write!(formatter, "skip file: {}", path.display()),
+            Self::InvalidArchive(message) => write!(formatter, "invalid archive: {message}"),
             Self::UnsupportedFileType { path, file_type } => {
                 write!(
                     formatter,

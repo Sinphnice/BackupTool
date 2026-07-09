@@ -119,6 +119,54 @@
         </div>
       </section>
 
+      <section>
+        <h2>Repository Archive</h2>
+        <label>
+          Archive algorithm
+          <select id="archive-algorithm">
+            <option value="tar" selected>tar</option>
+          </select>
+        </label>
+        <label>
+          Export repository
+          <span class="path-row">
+            <input id="archive-export-repository" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="archive-export-repository">
+              Browse
+            </button>
+          </span>
+        </label>
+        <label>
+          Export file
+          <span class="path-row">
+            <input id="archive-export-file" type="text" autocomplete="off" />
+            <button id="choose-export-file" type="button" class="browse-button">Browse</button>
+          </span>
+        </label>
+        <div class="actions">
+          <button id="export-repository" type="button">Export Repository</button>
+        </div>
+        <label>
+          Import archive file
+          <span class="path-row">
+            <input id="archive-import-file" type="text" autocomplete="off" />
+            <button id="choose-import-file" type="button" class="browse-button">Browse</button>
+          </span>
+        </label>
+        <label>
+          Import destination
+          <span class="path-row">
+            <input id="archive-import-destination" type="text" autocomplete="off" />
+            <button type="button" class="browse-button" data-target="archive-import-destination">
+              Browse
+            </button>
+          </span>
+        </label>
+        <div class="actions">
+          <button id="import-repository" type="button">Import Repository</button>
+        </div>
+      </section>
+
       <p id="core-result" aria-live="polite"></p>
     </main>
     <script type="module" src="/main.ts"></script>

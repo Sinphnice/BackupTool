@@ -6,3 +6,6 @@ edition = "2021"
 [lib]
 name = "backup_core"
 path = "src/lib.rs"
+
+[dependencies]
+tar = "0.4"

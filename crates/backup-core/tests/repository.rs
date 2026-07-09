@@ -1,5 +1,5 @@
 use backup_core::{
-    BackupFilter, FileKind, FlattenConflictStrategy, Repository, RestoreOptions,
+    ArchiveAlgorithm, BackupFilter, FileKind, FlattenConflictStrategy, Repository, RestoreOptions,
     RestorePathStrategy, RestoreStrategy, SnapshotId,
 };
 use std::fs;
@@ -571,6 +571,93 @@ impl SnapshotDoesNotExistExt for backup_core::BackupError {
     fn is_snapshot_missing(&self) -> bool {
         matches!(self, backup_core::BackupError::SnapshotDoesNotExist(_))
     }
+}
+
+#[test]
+fn repository_exports_and_imports_tar_archive() {
+    let root = TestDir::new("repo_archive_round_trip");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let archive = root.path.join("repository.tar");
+    let imported = root.path.join("imported");
+    let restored = root.path.join("restored");
+    fs::create_dir_all(source.join("docs")).unwrap();
+    fs::write(source.join("docs").join("a.txt"), "alpha").unwrap();
+    fs::write(source.join("b.txt"), "beta").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let exported = repository
+        .export_archive(&archive, ArchiveAlgorithm::Tar)
+        .unwrap();
+    assert_eq!(exported.algorithm, ArchiveAlgorithm::Tar);
+    assert!(exported.byte_count > 0);
+    assert!(archive.is_file());
+
+    let imported_repository =
+        Repository::import_archive(&archive, &imported, ArchiveAlgorithm::Tar).unwrap();
+    let snapshots = imported_repository.reader().list_snapshots().unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].id.as_str(), snapshot.id.as_str());
+
+    imported_repository
+        .reader()
+        .restore(&snapshot.id, &restored)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(restored.join("docs").join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(fs::read_to_string(restored.join("b.txt")).unwrap(), "beta");
+}
+
+#[test]
+fn export_rejects_non_repository_directory() {
+    let root = TestDir::new("repo_archive_export_reject");
+    let repository_path = root.path.join("repository");
+    let repository = Repository::init(&repository_path).unwrap();
+    fs::remove_file(repository_path.join("repo.meta")).unwrap();
+
+    let error = repository
+        .export_archive(root.path.join("out.tar"), ArchiveAlgorithm::Tar)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        backup_core::BackupError::InvalidRepository(_)
+    ));
+}
+
+#[test]
+fn import_rejects_non_empty_destination() {
+    let root = TestDir::new("repo_archive_import_reject");
+    let repository_path = root.path.join("repository");
+    let archive = root.path.join("repository.tar");
+    let destination = root.path.join("destination");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+    let repository = Repository::init(&repository_path).unwrap();
+    repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    repository
+        .export_archive(&archive, ArchiveAlgorithm::Tar)
+        .unwrap();
+    fs::create_dir_all(&destination).unwrap();
+    fs::write(destination.join("existing.txt"), "exists").unwrap();
+
+    let error =
+        Repository::import_archive(&archive, &destination, ArchiveAlgorithm::Tar).unwrap_err();
+
+    assert!(matches!(
+        error,
+        backup_core::BackupError::InvalidRepository(_)
+    ));
 }
 
 fn set_modified_time(path: &std::path::Path, modified: SystemTime) {

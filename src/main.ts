@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 type OperationResult = {
@@ -28,9 +28,19 @@ type SnapshotInfo = {
   createdUnixSeconds?: number;
 };
 
+type ArchiveResult = {
+  algorithm: string;
+  path: string;
+  byteCount: number;
+};
+
 const result = required<HTMLParagraphElement>("#core-result");
 const startBackup = required<HTMLButtonElement>("#start-backup");
 const startRestore = required<HTMLButtonElement>("#start-restore");
+const exportRepository = required<HTMLButtonElement>("#export-repository");
+const importRepository = required<HTMLButtonElement>("#import-repository");
+const chooseExportFile = required<HTMLButtonElement>("#choose-export-file");
+const chooseImportFile = required<HTMLButtonElement>("#choose-import-file");
 const addSource = required<HTMLButtonElement>("#add-source");
 const sourceList = required<HTMLDivElement>("#source-list");
 const openRepository = required<HTMLButtonElement>("#open-repository");
@@ -39,6 +49,7 @@ const snapshotList = required<HTMLSelectElement>("#snapshot-list");
 const restorePathStrategy = required<HTMLSelectElement>("#restore-path-strategy");
 const flattenConflictRow = required<HTMLElement>("#flatten-conflict-row");
 const flattenConflictStrategy = required<HTMLSelectElement>("#flatten-conflict-strategy");
+const archiveAlgorithm = required<HTMLSelectElement>("#archive-algorithm");
 const browseButtons = document.querySelectorAll<HTMLButtonElement>(".browse-button");
 const sourcePaths: string[] = [];
 let currentRepositoryPath = "";
@@ -110,6 +121,10 @@ function formatSnapshot(value: SnapshotInfo): string {
   return `${created} | ${value.fileCount} files | ${value.byteCount} bytes | ${value.id}`;
 }
 
+function formatArchiveOperation(name: string, value: ArchiveResult): string {
+  return `${name} succeeded: ${value.algorithm}, ${value.byteCount} bytes, ${value.path}.`;
+}
+
 function selectedSnapshotId(): string {
   return snapshotList.value.trim();
 }
@@ -125,6 +140,29 @@ async function chooseDirectory(): Promise<string | undefined> {
   }
 
   return selected;
+}
+
+async function chooseArchiveFile(): Promise<string | undefined> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    filters: [{ name: "tar archive", extensions: ["tar"] }],
+  });
+
+  if (typeof selected !== "string") {
+    return undefined;
+  }
+
+  return selected;
+}
+
+async function chooseExportArchiveFile(): Promise<string | undefined> {
+  const selected = await save({
+    defaultPath: "repository.tar",
+    filters: [{ name: "tar archive", extensions: ["tar"] }],
+  });
+
+  return selected ?? undefined;
 }
 
 function renderSourceList(): void {
@@ -237,6 +275,28 @@ openRepository.addEventListener("click", async () => {
   }
 });
 
+chooseExportFile.addEventListener("click", async () => {
+  try {
+    const selected = await chooseExportArchiveFile();
+    if (selected) {
+      required<HTMLInputElement>("#archive-export-file").value = selected;
+    }
+  } catch (error) {
+    result.textContent = String(error);
+  }
+});
+
+chooseImportFile.addEventListener("click", async () => {
+  try {
+    const selected = await chooseArchiveFile();
+    if (selected) {
+      required<HTMLInputElement>("#archive-import-file").value = selected;
+    }
+  } catch (error) {
+    result.textContent = String(error);
+  }
+});
+
 restorePathStrategy.addEventListener("change", updateRestoreStrategyControls);
 
 startBackup.addEventListener("click", async () => {
@@ -279,6 +339,36 @@ startRestore.addEventListener("click", async () => {
       flattenConflictStrategy: flattenConflictStrategy.value,
     });
     result.textContent = formatOperation("Restore", value);
+  } catch (error) {
+    result.textContent = String(error);
+  }
+});
+
+exportRepository.addEventListener("click", async () => {
+  result.textContent = "Exporting repository...";
+
+  try {
+    const value = await invoke<ArchiveResult>("export_repository", {
+      repositoryPath: inputValue("#archive-export-repository"),
+      archivePath: inputValue("#archive-export-file"),
+      algorithm: archiveAlgorithm.value,
+    });
+    result.textContent = formatArchiveOperation("Export", value);
+  } catch (error) {
+    result.textContent = String(error);
+  }
+});
+
+importRepository.addEventListener("click", async () => {
+  result.textContent = "Importing repository...";
+
+  try {
+    const value = await invoke<ArchiveResult>("import_repository", {
+      archivePath: inputValue("#archive-import-file"),
+      destination: inputValue("#archive-import-destination"),
+      algorithm: archiveAlgorithm.value,
+    });
+    result.textContent = `${formatArchiveOperation("Import", value)} Open this repository to restore snapshots.`;
   } catch (error) {
     result.textContent = String(error);
   }

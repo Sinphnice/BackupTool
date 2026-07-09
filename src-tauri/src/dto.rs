@@ -36,6 +36,14 @@ pub(crate) struct RestoreResultDto {
     pub(crate) byte_count: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArchiveResultDto {
+    pub(crate) algorithm: String,
+    pub(crate) path: String,
+    pub(crate) byte_count: u64,
+}
+
 /// GUI 鍔犺浇 repository 鏃惰繑鍥炵殑 snapshot 鎽樿銆?
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +99,18 @@ impl From<backup_core::SnapshotInfo> for SnapshotInfoDto {
             file_count: value.file_count,
             byte_count: value.byte_count,
             created_unix_seconds: value.created_unix_seconds,
+        }
+    }
+}
+
+impl From<backup_core::ArchiveResult> for ArchiveResultDto {
+    fn from(value: backup_core::ArchiveResult) -> Self {
+        Self {
+            algorithm: match value.algorithm {
+                backup_core::ArchiveAlgorithm::Tar => "tar".to_string(),
+            },
+            path: value.path.display().to_string(),
+            byte_count: value.byte_count,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::commands::{backup, list_snapshots, restore};
+use crate::commands::{backup, export_repository, import_repository, list_snapshots, restore};
 use crate::dto::{BackupFilterDto, FlattenConflictStrategyDto, RestorePathStrategyDto};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -208,6 +208,101 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
 
     assert!(restore_dir.join("same.txt").exists());
     assert!(restore_dir.join("same (1).txt").exists());
+}
+
+#[test]
+fn export_and_import_repository_commands_round_trip_tar() {
+    let root = TestDir::new("tauri_archive_round_trip");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    let archive = root.path.join("repository.tar");
+    let imported = root.path.join("imported");
+    let restored = root.path.join("restored");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let backup_result = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+    let export_result = export_repository(
+        repository_dir.to_string_lossy().into_owned(),
+        archive.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(export_result.algorithm, "tar");
+    assert!(export_result.byte_count > 0);
+
+    let import_result = import_repository(
+        archive.to_string_lossy().into_owned(),
+        imported.to_string_lossy().into_owned(),
+        Some("tar".to_string()),
+    )
+    .unwrap();
+    assert_eq!(import_result.algorithm, "tar");
+    assert_eq!(import_result.path, imported.display().to_string());
+
+    let snapshots = list_snapshots(imported.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].id, backup_result.snapshot_id);
+    restore(
+        imported.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        restored.to_string_lossy().into_owned(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(restored.join("a.txt")).unwrap(), "alpha");
+}
+
+#[test]
+fn archive_commands_reject_unknown_algorithm() {
+    let error = export_repository(
+        "unused".to_string(),
+        "unused".to_string(),
+        Some("zip".to_string()),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("unsupported archive algorithm: zip"));
+}
+
+#[test]
+fn import_repository_command_rejects_non_empty_destination() {
+    let root = TestDir::new("tauri_archive_non_empty");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    let archive = root.path.join("repository.tar");
+    let destination = root.path.join("destination");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+    backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap();
+    export_repository(
+        repository_dir.to_string_lossy().into_owned(),
+        archive.to_string_lossy().into_owned(),
+        Some("tar".to_string()),
+    )
+    .unwrap();
+    fs::create_dir_all(&destination).unwrap();
+    fs::write(destination.join("existing.txt"), "exists").unwrap();
+
+    let error = import_repository(
+        archive.to_string_lossy().into_owned(),
+        destination.to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("import destination exists and is not empty"));
 }
 
 struct TestDir {

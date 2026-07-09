@@ -10,6 +10,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::backup,
+            commands::export_repository,
+            commands::import_repository,
             commands::list_snapshots,
             commands::restore
         ])
