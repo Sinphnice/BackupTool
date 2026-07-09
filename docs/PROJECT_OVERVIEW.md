@@ -1,10 +1,10 @@
-# BackupTool 项目说明
+# BackupTool 项目概览
 
-本文用于帮助开发者快速理解 BackupTool 的项目构成、架构设计、核心类型、构建方法和后续开发边界，也可作为后续系统设计文档的基础材料。环境安装细节见 [DEVELOPMENT.md](DEVELOPMENT.md)，课程要求见 [course.md](course.md)，后续路线见 [../.agents/PLAN.md](../.agents/PLAN.md)。
+本文用于帮助开发者快速理解 BackupTool 的项目组成、架构设计、核心数据模型、构建方式和测试分布。环境安装细节见 [DEVELOPMENT.md](DEVELOPMENT.md)，课程要求见 [course.md](course.md)，后续开发规划见 [../.agents/PLAN.md](../.agents/PLAN.md)。
 
-## 1. 项目概述
+## 1. 项目定位
 
-BackupTool 是《软件开发综合实验》课程项目，目标是实现一款桌面端数据备份软件。当前版本已经从早期 C++ Core + Rust FFI 方案调整为纯 Rust 后端方案，整体调用链为：
+BackupTool 是一个基于 Tauri 2 的桌面备份工具。当前版本已经从早期 C++ Core + Rust FFI 方案迁移为纯 Rust 后端核心，整体调用链为：
 
 ```text
 TypeScript GUI
@@ -12,58 +12,49 @@ TypeScript GUI
         -> Rust backup-core
 ```
 
-当前采用 repository backup：每次备份生成一个 snapshot manifest，普通文件内容保存到 object store，恢复时按用户指定的 snapshot id 还原目录结构和文件内容。
+当前备份格式采用目录型 repository，而不是简单镜像复制。每次备份生成一个 snapshot manifest，普通文件内容写入 object store；恢复时选择 snapshot，并按恢复路径策略将对象内容还原到目标目录。
 
-早期 legacy mirror backup，也就是单纯目录复制形式的备份，已经从核心库、Tauri command 和测试中移除。当前 GUI 的备份/恢复按钮调用的是 repository backup / restore。
+当前已经支持：
 
-当前已支持：
+- 多源目录备份。
+- 源路径规范化、去重、父子目录去重。
+- repository 初始化、打开、备份、恢复。
+- snapshot 列表读取和 GUI 选择。
+- 路径、扩展名、文件名、文件大小、修改时间筛选。
+- 三种恢复路径策略：`PreserveFullPath`、`PreserveRelativePath`、`Flatten`。
+- `Flatten` 冲突策略：`Error`、`Skip`、`Overwrite`、`Rename`。
+- 基础文件元数据记录与恢复策略。
+- repository 导出为 `.tar`，以及从 `.tar` 导入为 repository。
+- core 层和 Tauri command 层自动化测试。
 
-- 普通目录备份。
-- 普通目录恢复。
-- 保留相对目录结构。
-- 自动创建目标目录。
-- 路径、扩展名、文件名、修改时间、文件大小筛选。
-- 仓库目录初始化。
-- snapshot manifest 写入和读取。
-- object store 保存普通文件内容。
-- 按指定 snapshot 恢复普通文件和目录结构。
-- 备份后返回 snapshot id。
-- GUI 触发备份和恢复。
-- 核心库和 Tauri command 层自动化测试。
-
-尚未实现：
-
-- snapshot 列表和选择界面。
-- 特殊文件处理和完整元数据恢复。
-- 打包、压缩、加密。
-- 定时备份、实时备份、网络备份。
+当前不再保留 legacy mirror backup，也就是单纯目录复制式备份。GUI 的备份、恢复、归档操作都围绕 repository 模型工作。
 
 ## 2. 项目结构
 
 ```text
 BackupTool/
 ├── src/                    # 前端界面：TypeScript / HTML / CSS
-├── src-tauri/              # Tauri 桌面应用层：命令、DTO、窗口配置
+├── src-tauri/              # Tauri 桌面应用层：command、DTO、权限、窗口配置
 ├── crates/
 │   └── backup-core/        # 纯 Rust 备份核心库
 ├── scripts/                # Windows 环境检查和开发辅助脚本
-├── docs/                   # 面向开发和课程提交的公开文档
-├── .agents/                # 开发规划和 agent 工作资料，不提交远程
+├── docs/                   # 项目文档
+├── .agents/                # 开发规划和 agent 工作资料，不进入远程仓库
 ├── Cargo.toml              # Rust workspace
-├── package.json            # 前端和 Tauri CLI 依赖
+├── package.json            # 前端与 Tauri CLI 依赖
 ├── pnpm-lock.yaml          # 前端依赖锁定文件
-└── justfile                # 顶层任务入口
+└── justfile                # 项目级任务入口
 ```
 
-主要组成如下：
+主要分层：
 
 | 层次 | 路径 | 技术 | 职责 |
 | --- | --- | --- | --- |
-| GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 收集用户输入、调用 Tauri command、展示执行结果。 |
-| 桌面应用层 | `src-tauri/` | Rust, Tauri 2, serde | 提供桌面窗口、命令入口、DTO 转换、路径输入校验。 |
-| 核心业务层 | `crates/backup-core/` | Rust | 实现 repository、snapshot、manifest、object store、筛选和错误模型。 |
-| 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和打包。 |
-| 环境脚本 | `scripts/` | PowerShell | 检查并准备 Windows 开发依赖，或单独启动 Vite。 |
+| GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 目录选择、参数输入、snapshot 选择、结果展示 |
+| 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | 暴露 Tauri command、DTO 转换、路径校验、错误转换 |
+| 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、manifest、object store、恢复策略、tar 归档 |
+| 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和构建 |
+| 环境脚本 | `scripts/` | PowerShell | 检查 Windows 开发依赖，或单独启动 Vite |
 
 ## 3. 依赖与构建工具
 
@@ -79,6 +70,7 @@ BackupTool/
 前端依赖由 `pnpm` 管理：
 
 - `@tauri-apps/api`：前端调用 Tauri command。
+- `@tauri-apps/plugin-dialog`：目录和文件选择对话框。
 - `@tauri-apps/cli`：Tauri 开发运行和打包。
 - `typescript`：类型检查。
 - `vite`：前端开发服务和静态资源构建。
@@ -86,8 +78,8 @@ BackupTool/
 Rust 依赖由 Cargo workspace 管理：
 
 - 根目录 `Cargo.toml` 声明 workspace。
-- `crates/backup-core` 是独立核心库，目前不依赖第三方 crate。
-- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`。
+- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包。
+- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog`。
 
 当前项目不再需要 CMake、MSBuild、C ABI 或 C++ 编译链。
 
@@ -97,143 +89,180 @@ Rust 依赖由 Cargo workspace 管理：
 
 ```text
 GUI 层
-    负责输入和展示
+    负责输入、交互和展示
 
-Tauri 命令层
-    负责桌面应用入口、DTO 转换和错误映射
+Tauri command 层
+    负责桌面应用边界、DTO 转换和错误映射
 
 backup-core 核心层
-    负责备份、恢复、筛选和后续核心业务模型
+    负责备份、恢复、筛选、仓库、快照、归档等核心业务
 ```
 
 实际调用路径：
 
 ```text
 src/main.ts
-    -> invoke("backup" / "restore")
+    -> invoke("backup" / "restore" / "list_snapshots" / "export_repository" / "import_repository")
         -> src-tauri/src/commands.rs
-            -> crates/backup-core/src/lib.rs
+            -> crates/backup-core
 ```
 
 分层原则：
 
 - GUI 不实现备份算法。
-- Tauri command 不堆积业务逻辑。
+- Tauri command 不堆积复杂业务逻辑。
 - `backup-core` 不依赖 Tauri、Node.js 或 GUI。
-- 新业务能力先在 `backup-core` 中形成可测试 API，再向 Tauri 和 GUI 暴露。
-- 桌面交互可以影响 DTO 设计，但不应反向污染核心业务模型。
+- 新业务能力优先在 `backup-core` 中形成可测试 API，再向 Tauri 和 GUI 暴露。
+- 前端交互可以影响 DTO 设计，但不应反向污染核心业务模型。
 
-## 5. 关键类型与关系
+## 5. Repository 设计
 
-当前核心业务集中在 `crates/backup-core/src/lib.rs` 和 `crates/backup-core/src/repository.rs`。
-
-筛选条件：
+repository 是一个目录型备份仓库，磁盘结构为：
 
 ```text
-BackupFilter
-├── include_path_contains
-├── exclude_path_contains
-├── extensions
-├── include_name_contains
-├── exclude_name_contains
-├── min_size
-├── max_size
-├── modified_after
-└── modified_before
+repository/
+├── repo.meta
+├── objects/
+├── snapshots/
+└── indexes/
 ```
 
-错误模型：
+各部分职责：
+
+- `repo.meta`：仓库标识文件，用于判断目录是否为合法 BackupTool repository。
+- `objects/`：保存普通文件内容。对象名由内容 hash 和文件大小组成，相同内容可以复用。
+- `snapshots/`：保存每次备份生成的 manifest，例如 `snapshot-xxxx.manifest`。
+- `indexes/`：当前已创建，主要为后续索引能力预留。
+
+一次备份的大致流程：
 
 ```text
-BackupError
-├── EmptyPath
-├── SourceDoesNotExist
-├── SourceIsNotDirectory
-├── Io
-└── InvalidModifiedTime
+用户选择一个或多个源目录
+    -> 源路径规范化和去重
+    -> 扫描目录树
+    -> BackupFilter 判断普通文件是否进入备份
+    -> 文件内容写入 objects/
+    -> snapshots/<snapshot-id>.manifest 记录结构和对象引用
+    -> 返回 snapshot id、文件数、字节数
 ```
 
-Tauri 命令层的 DTO 位于 `src-tauri/src/dto.rs`：
-
-- `BackupFilterDto`：接收前端 camelCase 筛选字段。
-- `BackupResultDto`：返回备份结果。
-- `RestoreResultDto`：返回恢复结果。
-- `impl From<BackupFilterDto> for BackupFilter`：把界面输入转换为核心库筛选模型。
-
-重要关系：
+一次恢复的大致流程：
 
 ```text
-TypeScript BackupFilter
-    -> BackupFilterDto
-        -> BackupFilter
-            -> RepositoryWriter::backup
+用户打开 repository
+    -> list_snapshots 读取可用 snapshot
+    -> 用户选择 snapshot 和恢复策略
+    -> 读取 manifest
+    -> 从 objects/ 读取对象内容
+    -> 按路径策略写入恢复目标目录
 ```
 
-仓库式备份类型：
+## 6. 归档设计
+
+当前支持将整个 repository 导出为单个 `.tar` 文件，也支持从 `.tar` 导入为可打开的 repository。
+
+归档能力定位为 repository 的导出/导入格式，而不是替代 repository 本身：
+
+```text
+repository/
+    -> export_repository
+        -> repository.tar
+
+repository.tar
+    -> import_repository
+        -> repository/
+            -> Open Repository
+            -> Restore snapshot
+```
+
+当前只支持未压缩 tar：
+
+- 不实现 `.tar.gz`、`.zip`、压缩、加密或分卷。
+- 使用 Rust `tar` crate，不调用系统 `tar` 命令。
+- tar 内部只保存相对路径。
+- 导出内容限定为 `repo.meta`、`objects/`、`snapshots/`、`indexes/`。
+- 如果导出目标 `.tar` 放在 repository 根目录下，不会被作为仓库内容打入 tar。
+- 导入目标目录必须不存在或为空，避免和已有文件混合。
+- 导入时拒绝绝对路径、`..`、symlink 等非常规 tar entry，避免不安全解包。
+
+对应 Tauri command：
+
+```text
+export_repository(repository_path, archive_path, algorithm?)
+import_repository(archive_path, destination, algorithm?)
+```
+
+`algorithm` 当前默认为 `tar`，未知算法会返回错误。
+
+## 7. 关键类型与关系
+
+核心类型主要位于 `crates/backup-core/src/lib.rs` 和 `crates/backup-core/src/repository.rs`。
 
 ```text
 Repository
 ├── init(root)
 ├── open(root)
 ├── writer() -> RepositoryWriter
-└── reader() -> RepositoryReader
+├── reader() -> RepositoryReader
+├── export_archive(output_file, ArchiveAlgorithm)
+└── import_archive(archive_file, destination, ArchiveAlgorithm)
 
 RepositoryWriter
-└── backup(source, filter) -> Snapshot
+└── backup_many(sources, filter) -> Snapshot
 
 RepositoryReader
+├── list_snapshots() -> Vec<SnapshotInfo>
 ├── read_manifest(snapshot_id) -> Manifest
-└── restore(snapshot_id, destination)
+└── restore_with_options(snapshot_id, destination, RestoreOptions)
 
 Manifest
 ├── snapshot_id: SnapshotId
+├── sources: Vec<SourceInfo>
 └── entries: Vec<ManifestEntry>
 
 ManifestEntry
-├── relative_path: PathBuf
-├── kind: FileKind
-├── size: u64
-├── modified_unix_seconds: Option<i64>
-└── object_id: Option<ObjectId>
+├── source_index
+├── relative_path
+├── kind
+├── size
+├── modified_unix_seconds
+├── object_id
+└── metadata
 
 ObjectStore
 ├── write_object(bytes) -> ObjectId
 └── read_object(object_id) -> Vec<u8>
 ```
 
-## 6. 当前业务流程
-
-备份流程：
+恢复相关策略：
 
 ```text
-用户填写源目录、repository 目录、筛选条件
-    -> 前端收集表单
-    -> invoke("backup")
-    -> Tauri 反序列化 BackupFilterDto
-    -> commands::backup 打开或初始化 Repository
-    -> RepositoryWriter::backup
-    -> 遍历源目录
-    -> BackupFilter::allows 判断普通文件是否进入备份
-    -> 普通文件内容写入 object store
-    -> snapshots/<snapshot-id>.manifest 记录快照
-    -> 返回 BackupResultDto
-    -> GUI 显示文件数、字节数和 snapshot id
+RestoreOptions
+├── strategy: RestoreStrategy
+├── path_strategy: RestorePathStrategy
+└── flatten_conflict_strategy: FlattenConflictStrategy
 ```
 
-恢复流程：
+Tauri DTO 位于 `src-tauri/src/dto.rs`：
 
-```text
-用户填写 repository 目录、snapshot id 和恢复目录
-    -> 前端调用 invoke("restore")
-    -> commands::restore 打开 Repository
-    -> RepositoryReader::read_manifest 读取指定 snapshot
-    -> RepositoryReader::restore
-    -> 按 manifest 创建目录并从 object store 读取文件内容
-    -> 返回 RestoreResultDto
-    -> GUI 显示文件数和字节数
-```
+- `BackupFilterDto`：前端筛选条件。
+- `BackupResultDto`：备份结果。
+- `RestoreResultDto`：恢复结果。
+- `SnapshotInfoDto`：snapshot 列表展示数据。
+- `ArchiveResultDto`：仓库导出/导入结果。
 
-## 7. 环境配置
+## 8. GUI 功能入口
+
+当前 GUI 主要分为四块：
+
+- `Backup`：添加一个或多个源目录，选择 repository 目录，执行备份。
+- `Filters`：配置路径、扩展名、文件名、大小、修改时间筛选。
+- `Restore`：打开 repository，自动加载 snapshot，选择恢复路径策略和目标目录。
+- `Repository Archive`：导出 repository 为 `.tar`，或从 `.tar` 导入 repository。
+
+GUI 只负责收集参数和展示结果，不直接操作 repository 文件结构。
+
+## 9. 环境配置
 
 首次配置：
 
@@ -257,9 +286,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.
 - just。
 - 项目 Node 依赖。
 
-如果 PowerShell 执行策略阻止 `pnpm.ps1`，使用 `pnpm.cmd`。本项目的 `justfile` 已经统一调用 `.cmd` 入口。
+如果 PowerShell 执行策略阻止 `pnpm.ps1`，使用 `pnpm.cmd`。本项目的 `justfile` 已统一调用 `.cmd` 入口。
 
-## 8. 构建、运行与测试
+## 10. 构建、运行与测试
 
 列出所有任务：
 
@@ -304,7 +333,7 @@ cargo test --workspace
 just dev
 ```
 
-`just dev` 会启动 Vite，再启动 Tauri。Vite 服务地址为：
+`just dev` 会先启动 Vite，再启动 Tauri。Vite 服务地址为：
 
 ```text
 http://127.0.0.1:1420
@@ -320,6 +349,12 @@ just vite
 
 ```powershell
 just build
+```
+
+构建并运行 release 可执行文件：
+
+```powershell
+just run
 ```
 
 清理构建产物：
@@ -340,27 +375,34 @@ target/release/backup-tool.exe
 target/release/bundle/
 ```
 
-## 9. 测试覆盖
+## 11. 测试覆盖
 
 当前测试分为两层。
 
 `backup-core` 测试覆盖：
 
-- 分号分隔筛选列表解析。
 - repository 目录结构创建。
 - snapshot manifest 写入和读取。
 - 连续备份生成不同 snapshot。
-- 按指定 snapshot 恢复不同历史版本。
-- repository 备份筛选。
-- 缺失 snapshot 错误。
+- 多源备份、重复源去重、父子源去重。
+- 按 snapshot 恢复历史版本。
+- 路径筛选和元数据恢复策略。
+- 三种恢复路径策略。
+- `Flatten` 冲突策略。
+- repository 导出 tar、导入 tar、导入后恢复。
+- 非 repository 导出失败。
+- 导入到非空目录失败。
 
 Tauri command 层测试覆盖：
 
-- `backup` command 调用核心库。
-- `restore` command 调用核心库。
-- 筛选 DTO 转换。
-- 备份结果返回 snapshot id。
-- 核心库错误转换为字符串。
+- `backup` command。
+- `restore` command。
+- `list_snapshots` command。
+- `export_repository` command。
+- `import_repository` command。
+- DTO 转换和错误字符串返回。
+- 未知归档算法错误。
+- 非空导入目标错误。
 
 提交前建议至少运行：
 
@@ -373,16 +415,16 @@ just test
 
 ```text
 just check 通过
-just test 通过，8 个测试全部通过
+just test 通过
 ```
 
-## 10. 开发方法
+## 12. 开发方法
 
-新增功能时，推荐按以下顺序推进：
+新增功能建议按以下顺序推进：
 
 ```text
-1. 在 backup-core 中设计类型和业务逻辑
-2. 为 backup-core 添加单元测试
+1. 在 backup-core 中设计核心类型和业务逻辑
+2. 为 backup-core 添加测试
 3. 在 src-tauri 中添加 DTO 和 command
 4. 为 command 层添加测试
 5. 在 src/ 中做最小 GUI 集成
@@ -392,30 +434,8 @@ just test 通过，8 个测试全部通过
 开发时应避免：
 
 - 在 TypeScript 中实现核心备份逻辑。
-- 在 Tauri command 中实现复杂业务流程。
+- 在 Tauri command 中堆积复杂业务流程。
 - 为临时界面需求破坏核心库模型。
 - 在核心能力不稳定前过早做复杂 GUI。
-- 在当前阶段提前实现打包、压缩、加密、定时、实时和网络备份。
 
-## 11. 后续设计方向
-
-后续规划以 `.agents/PLAN.md` 为准。当前已经完成第一版 repository/snapshot/manifest/object store，并已接入 Tauri command 和 GUI。下一步重点是围绕该模型继续扩展元数据、打包、压缩和加密：
-
-```text
-Repository
-    -> Snapshot
-        -> Manifest
-            -> ObjectStore
-```
-
-预期模块方向：
-
-- `repository`：管理仓库、快照、manifest 和对象存储。
-- `filesystem`：隔离不同平台的文件系统差异。
-- `metadata`：记录时间、权限、属主和平台扩展元数据。
-- `archive`：单文件打包和解包。
-- `compression`：压缩和解压。
-- `encryption`：加密和解密。
-- `task`：进度、取消、异步任务和后续暂停/恢复。
-
-近期不应直接进入 GUI 美化或高级功能，而应优先稳定 repository、snapshot、manifest、object store 这些核心模型，并补充 snapshot 列表、选择与错误提示等必要操作能力。
+后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、manifest、object store、archive、compression、encryption 等核心模型演进。
