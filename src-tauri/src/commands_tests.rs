@@ -18,6 +18,7 @@ fn backup_and_restore_round_trip_regular_files() {
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(backup_result.file_count, 3);
@@ -70,6 +71,7 @@ fn backup_applies_extension_filter() {
             modified_after: None,
             modified_before: None,
         }),
+        None,
     )
     .unwrap();
 
@@ -98,12 +100,14 @@ fn list_snapshots_returns_repository_snapshot_summaries() {
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         None,
+        None,
     )
     .unwrap();
     fs::write(source.join("b.txt"), "beta").unwrap();
     let second = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
     )
     .unwrap();
@@ -124,6 +128,7 @@ fn backup_returns_core_error_as_string() {
         vec!["Z:\\definitely\\missing\\backup-tool-source".to_string()],
         "unused".to_string(),
         None,
+        None,
     )
     .unwrap_err();
 
@@ -143,6 +148,7 @@ fn backup_rejects_non_empty_non_repository_destination() {
     let error = backup(
         vec![source.to_string_lossy().into_owned()],
         destination.to_string_lossy().into_owned(),
+        None,
         None,
     )
     .unwrap_err();
@@ -169,7 +175,7 @@ fn restore_requires_snapshot_id() {
 
 #[test]
 fn backup_requires_at_least_one_source() {
-    let error = backup(Vec::new(), "unused".to_string(), None).unwrap_err();
+    let error = backup(Vec::new(), "unused".to_string(), None, None).unwrap_err();
 
     assert!(error.contains("at least one source path is required"));
 }
@@ -193,6 +199,7 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
         ],
         repository_dir.to_string_lossy().into_owned(),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(backup_result.file_count, 2);
@@ -211,6 +218,61 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
 }
 
 #[test]
+fn backup_command_accepts_zstd_compression_and_restore_decompresses() {
+    let root = TestDir::new("tauri_zstd_backup");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    let restore_dir = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha alpha alpha").unwrap();
+
+    let backup_result = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        Some("zstd".to_string()),
+    )
+    .unwrap();
+    let object_path = fs::read_dir(repository_dir.join("objects"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(object_header_text(&object_path).contains("compression\tzstd"));
+    assert_ne!(
+        object_path.extension().and_then(|value| value.to_str()),
+        Some("zst")
+    );
+
+    restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(restore_dir.join("a.txt")).unwrap(),
+        "alpha alpha alpha"
+    );
+}
+
+#[test]
+fn backup_command_rejects_unknown_compression_algorithm() {
+    let error = backup(
+        vec!["unused".to_string()],
+        "unused".to_string(),
+        None,
+        Some("brotli".to_string()),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("unsupported compression algorithm: brotli"));
+}
+
+#[test]
 fn export_and_import_repository_commands_round_trip_tar() {
     let root = TestDir::new("tauri_archive_round_trip");
     let source = root.path.join("source");
@@ -224,6 +286,7 @@ fn export_and_import_repository_commands_round_trip_tar() {
     let backup_result = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
     )
     .unwrap();
@@ -284,6 +347,7 @@ fn import_repository_command_rejects_non_empty_destination() {
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         None,
+        None,
     )
     .unwrap();
     export_repository(
@@ -327,4 +391,13 @@ impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn object_header_text(path: &std::path::Path) -> String {
+    let bytes = fs::read(path).unwrap();
+    let end = bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .unwrap();
+    String::from_utf8(bytes[..end].to_vec()).unwrap()
 }

@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 tar = "0.4"
+zstd = "0.13"

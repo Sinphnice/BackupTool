@@ -1,6 +1,7 @@
 use backup_core::{
-    ArchiveAlgorithm, BackupFilter, FileKind, FlattenConflictStrategy, Repository, RestoreOptions,
-    RestorePathStrategy, RestoreStrategy, SnapshotId,
+    ArchiveAlgorithm, BackupFilter, BackupOptions, CompressionAlgorithm, FileKind,
+    FlattenConflictStrategy, Repository, RestoreOptions, RestorePathStrategy, RestoreStrategy,
+    SnapshotId,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -615,6 +616,388 @@ fn repository_exports_and_imports_tar_archive() {
 }
 
 #[test]
+fn zstd_backup_stores_compressed_object_and_restores_original_content() {
+    let root = TestDir::new("repo_zstd_round_trip");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("text.txt"), "alpha alpha alpha alpha").unwrap();
+    fs::write(source.join("binary.bin"), [0_u8, 1, 2, 3, 255]).unwrap();
+    fs::write(source.join("empty.txt"), []).unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    let manifest = repository.reader().read_manifest(&snapshot.id).unwrap();
+    let file_entries = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == FileKind::File)
+        .collect::<Vec<_>>();
+    assert_eq!(file_entries.len(), 3);
+    for entry in file_entries {
+        let object_id = entry.object_id.as_ref().unwrap();
+        let object_path = repository_path.join("objects").join(object_id.as_str());
+        assert!(object_path.exists());
+        assert!(object_header_text(&object_path).contains("compression\tzstd"));
+        assert!(!repository_path
+            .join("objects")
+            .join(format!("{}.zst", object_id.as_str()))
+            .exists());
+    }
+
+    repository.reader().restore(&snapshot.id, &restore).unwrap();
+    assert_eq!(
+        fs::read_to_string(restore.join("text.txt")).unwrap(),
+        "alpha alpha alpha alpha"
+    );
+    assert_eq!(
+        fs::read(restore.join("binary.bin")).unwrap(),
+        [0, 1, 2, 3, 255]
+    );
+    assert_eq!(
+        fs::read(restore.join("empty.txt")).unwrap(),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn object_id_uses_original_content_not_compressed_bytes() {
+    let root = TestDir::new("repo_zstd_object_id");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "same same same").unwrap();
+
+    let none_repository_path = root.path.join("none_repository");
+    let none_repository = Repository::init(&none_repository_path).unwrap();
+    let none_snapshot = none_repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let none_manifest = none_repository
+        .reader()
+        .read_manifest(&none_snapshot.id)
+        .unwrap();
+    let none_object = none_manifest
+        .entries
+        .iter()
+        .find(|entry| entry.kind == FileKind::File)
+        .and_then(|entry| entry.object_id.as_ref())
+        .unwrap()
+        .clone();
+
+    let zstd_repository_path = root.path.join("zstd_repository");
+    let zstd_repository = Repository::init(&zstd_repository_path).unwrap();
+    let zstd_snapshot = zstd_repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    let zstd_manifest = zstd_repository
+        .reader()
+        .read_manifest(&zstd_snapshot.id)
+        .unwrap();
+    let zstd_object = zstd_manifest
+        .entries
+        .iter()
+        .find(|entry| entry.kind == FileKind::File)
+        .and_then(|entry| entry.object_id.as_ref())
+        .unwrap()
+        .clone();
+
+    assert_eq!(none_object, zstd_object);
+    assert!(none_repository_path
+        .join("objects")
+        .join(none_object.as_str())
+        .exists());
+    assert!(zstd_repository_path
+        .join("objects")
+        .join(zstd_object.as_str())
+        .exists());
+    assert!(object_header_text(
+        &none_repository_path
+            .join("objects")
+            .join(none_object.as_str())
+    )
+    .contains("compression\tnone"));
+    assert!(object_header_text(
+        &zstd_repository_path
+            .join("objects")
+            .join(zstd_object.as_str())
+    )
+    .contains("compression\tzstd"));
+}
+
+#[test]
+fn tar_export_import_preserves_zstd_objects() {
+    let root = TestDir::new("repo_zstd_tar_round_trip");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let archive = root.path.join("repository.tar");
+    let imported = root.path.join("imported");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "compressed text").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    repository
+        .export_archive(&archive, ArchiveAlgorithm::Tar)
+        .unwrap();
+    let imported_repository =
+        Repository::import_archive(&archive, &imported, ArchiveAlgorithm::Tar).unwrap();
+
+    imported_repository
+        .reader()
+        .restore(&snapshot.id, &restore)
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(restore.join("a.txt")).unwrap(),
+        "compressed text"
+    );
+}
+
+#[test]
+fn manifest_entry_does_not_store_compression_algorithm() {
+    let root = TestDir::new("repo_manifest_no_compression");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "manifest").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    let manifest_path = repository_path
+        .join("snapshots")
+        .join(format!("{}.manifest", snapshot.id.as_str()));
+    let text = fs::read_to_string(&manifest_path).unwrap();
+
+    for line in text.lines().filter(|line| line.starts_with("entry\t")) {
+        assert_eq!(line.split('\t').count(), 11);
+        assert!(!line.contains("\tzstd"));
+        assert!(!line.contains("\tnone"));
+    }
+}
+
+#[test]
+fn same_object_id_is_rewritten_when_compression_algorithm_changes() {
+    let root = TestDir::new("repo_object_rewrite_zstd");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore_first = root.path.join("restore_first");
+    let restore_second = root.path.join("restore_second");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "same same same").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let first = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let first_object = first_file_object_id(&repository, &first.id);
+    assert!(
+        object_header_text(&repository_path.join("objects").join(first_object.as_str()))
+            .contains("compression\tnone")
+    );
+
+    let second = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    let second_object = first_file_object_id(&repository, &second.id);
+    assert_eq!(first_object, second_object);
+    assert!(
+        object_header_text(&repository_path.join("objects").join(first_object.as_str()))
+            .contains("compression\tzstd")
+    );
+
+    repository
+        .reader()
+        .restore(&first.id, &restore_first)
+        .unwrap();
+    repository
+        .reader()
+        .restore(&second.id, &restore_second)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(restore_first.join("a.txt")).unwrap(),
+        "same same same"
+    );
+    assert_eq!(
+        fs::read_to_string(restore_second.join("a.txt")).unwrap(),
+        "same same same"
+    );
+}
+
+#[test]
+fn same_object_id_can_be_rewritten_back_to_uncompressed() {
+    let root = TestDir::new("repo_object_rewrite_none");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "same same same").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let first = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                compression_algorithm: CompressionAlgorithm::Zstd,
+            },
+        )
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &first.id);
+    assert!(
+        object_header_text(&repository_path.join("objects").join(object_id.as_str()))
+            .contains("compression\tzstd")
+    );
+
+    repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    assert!(
+        object_header_text(&repository_path.join("objects").join(object_id.as_str()))
+            .contains("compression\tnone")
+    );
+
+    repository.reader().restore(&first.id, &restore).unwrap();
+    assert_eq!(
+        fs::read_to_string(restore.join("a.txt")).unwrap(),
+        "same same same"
+    );
+}
+
+#[test]
+fn invalid_object_magic_returns_error() {
+    let root = TestDir::new("repo_object_bad_magic");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    fs::write(
+        repository_path.join("objects").join(object_id.as_str()),
+        "bad\n\npayload",
+    )
+    .unwrap();
+
+    let error = repository
+        .reader()
+        .restore(&snapshot.id, &restore)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("invalid object magic"));
+}
+
+#[test]
+fn object_payload_size_mismatch_returns_error() {
+    let root = TestDir::new("repo_object_bad_payload_size");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    fs::write(
+        repository_path.join("objects").join(object_id.as_str()),
+        "backup-tool object v1\ncompression\tnone\noriginal_size\t5\npayload_size\t99\n\nalpha",
+    )
+    .unwrap();
+
+    let error = repository
+        .reader()
+        .restore(&snapshot.id, &restore)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("object payload size mismatch"));
+}
+
+#[test]
+fn object_original_size_mismatch_returns_error() {
+    let root = TestDir::new("repo_object_bad_original_size");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    fs::write(
+        repository_path.join("objects").join(object_id.as_str()),
+        "backup-tool object v1\ncompression\tnone\noriginal_size\t99\npayload_size\t5\n\nalpha",
+    )
+    .unwrap();
+
+    let error = repository
+        .reader()
+        .restore(&snapshot.id, &restore)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("object original size mismatch"));
+}
+
+#[test]
 fn export_rejects_non_repository_directory() {
     let root = TestDir::new("repo_archive_export_reject");
     let repository_path = root.path.join("repository");
@@ -718,6 +1101,31 @@ fn collect_file_names(root: &std::path::Path) -> Vec<String> {
     let mut files = Vec::new();
     collect_file_names_into(root, root, &mut files);
     files
+}
+
+fn object_header_text(path: &std::path::Path) -> String {
+    let bytes = fs::read(path).unwrap();
+    let end = bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .unwrap();
+    String::from_utf8(bytes[..end].to_vec()).unwrap()
+}
+
+fn first_file_object_id(
+    repository: &Repository,
+    snapshot_id: &backup_core::SnapshotId,
+) -> backup_core::ObjectId {
+    repository
+        .reader()
+        .read_manifest(snapshot_id)
+        .unwrap()
+        .entries
+        .iter()
+        .find(|entry| entry.kind == FileKind::File)
+        .and_then(|entry| entry.object_id.as_ref())
+        .unwrap()
+        .clone()
 }
 
 fn collect_file_names_into(

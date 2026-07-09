@@ -50,6 +50,7 @@ const restorePathStrategy = required<HTMLSelectElement>("#restore-path-strategy"
 const flattenConflictRow = required<HTMLElement>("#flatten-conflict-row");
 const flattenConflictStrategy = required<HTMLSelectElement>("#flatten-conflict-strategy");
 const archiveAlgorithm = required<HTMLSelectElement>("#archive-algorithm");
+const compressionAlgorithm = required<HTMLSelectElement>("#compression-algorithm");
 const browseButtons = document.querySelectorAll<HTMLButtonElement>(".browse-button");
 const sourcePaths: string[] = [];
 let currentRepositoryPath = "";
@@ -311,6 +312,7 @@ startBackup.addEventListener("click", async () => {
       sources: sourcePaths,
       destination: inputValue("#backup-destination"),
       filter: collectFilter(),
+      compressionAlgorithm: compressionAlgorithm.value,
     });
     result.textContent = formatOperation("Backup", value);
   } catch (error) {

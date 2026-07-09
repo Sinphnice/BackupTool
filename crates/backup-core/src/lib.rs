@@ -14,9 +14,9 @@ pub use filesystem::{
     RestoreReport, RestoreStrategy, RestoreWarning, WindowsFileSystemProvider, WindowsMetadata,
 };
 pub use repository::{
-    ArchiveAlgorithm, ArchiveResult, ContentHasher, FileKind, Manifest, ManifestEntry, ObjectId,
-    ObjectStore, Repository, RepositoryReader, RepositoryWriter, Snapshot, SnapshotId,
-    SnapshotInfo, SourceInfo,
+    ArchiveAlgorithm, ArchiveResult, BackupOptions, CompressionAlgorithm, ContentHasher, FileKind,
+    Manifest, ManifestEntry, ObjectId, ObjectStore, Repository, RepositoryReader, RepositoryWriter,
+    Snapshot, SnapshotId, SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]

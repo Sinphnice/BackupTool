@@ -438,4 +438,45 @@ just test 通过
 - 为临时界面需求破坏核心库模型。
 - 在核心能力不稳定前过早做复杂 GUI。
 
-后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、manifest、object store、archive、compression、encryption 等核心模型演进。
+## 13. Object 级压缩设计
+
+当前压缩能力作用于 repository 的 `objects/`，粒度是单个 object，而不是整个仓库目录或整个 tar 包。备份时可以选择压缩算法：
+
+- `none`：默认值，不压缩 payload。
+- `zstd`：使用 zstd 压缩 payload。
+
+`object-id` 始终由原始文件内容计算，不由 object header、压缩后的 payload 或后续可能加入的加密信息计算。这一点很重要：同一份原始文件内容即使采用不同压缩算法，逻辑 object id 也保持一致。
+
+object 物理路径统一为：
+
+```text
+objects/<object-id>
+```
+
+object 文件内部使用文本 header + 二进制 payload：
+
+```text
+backup-tool object v1
+compression    none|zstd
+original_size  <u64>
+payload_size   <u64>
+
+<payload bytes>
+```
+
+压缩算法记录在 object header 中，不记录在 manifest entry 中。压缩和解压只处理空行之后的 payload bytes，不处理 header。若同一 `object-id` 已存在但 header 中的 compression 与本次备份选择不同，会用同一份原始数据按本次算法重新生成 object 并覆盖；由于 object id 对应的原始内容不变，旧 snapshot 仍可恢复出相同文件内容。
+
+恢复流程中用户不需要选择压缩算法：
+
+```text
+manifest entry
+    -> object_id
+    -> ObjectStore 读取 objects/<object-id>
+    -> 解析 object header 中的 compression
+    -> 如果是 zstd 则解压 payload
+    -> 写回原始文件内容
+```
+
+tar 导出/导入会保留 `objects/` 下的自描述 object 文件，因此压缩 repository 可以作为 tar 文件迁移到其他系统后再恢复。
+
+后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、manifest、object store、archive、compression、encryption 等核心模型演进。压缩已经具备 object 级 zstd 第一版，后续可继续扩展压缩率统计、压缩等级配置和更多算法。

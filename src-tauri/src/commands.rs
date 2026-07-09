@@ -3,7 +3,8 @@ use crate::dto::{
     RestorePathStrategyDto, RestoreResultDto, SnapshotInfoDto,
 };
 use backup_core::{
-    ArchiveAlgorithm, BackupError, FileKind, Manifest, Repository, RestoreOptions, SnapshotId,
+    ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, FileKind, Manifest,
+    Repository, RestoreOptions, SnapshotId,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,9 @@ pub(crate) fn backup(
     sources: Vec<String>,
     destination: String,
     filter: Option<BackupFilterDto>,
+    compression_algorithm: Option<String>,
 ) -> Result<BackupResultDto, String> {
+    let compression_algorithm = compression_algorithm_from_input(compression_algorithm)?;
     let sources = paths_from_input(sources, "source")?;
     for source in &sources {
         ensure_source_directory(source)?;
@@ -24,9 +27,12 @@ pub(crate) fn backup(
     let repository_path = path_from_input(destination, "repository")?;
     let repository = open_or_init_repository(repository_path)?;
     let filter = filter.map(Into::into).unwrap_or_default();
+    let options = BackupOptions {
+        compression_algorithm,
+    };
     let snapshot = repository
         .writer()
-        .backup_many(sources, &filter)
+        .backup_many_with_options(sources, &filter, options)
         .map_err(|error| error.to_string())?;
     let manifest = repository
         .reader()
@@ -203,6 +209,15 @@ fn archive_algorithm_from_input(value: Option<String>) -> Result<ArchiveAlgorith
 fn archive_algorithm_name(value: ArchiveAlgorithm) -> &'static str {
     match value {
         ArchiveAlgorithm::Tar => "tar",
+    }
+}
+
+fn compression_algorithm_from_input(value: Option<String>) -> Result<CompressionAlgorithm, String> {
+    let value = value.unwrap_or_else(|| "none".to_string());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(CompressionAlgorithm::None),
+        "zstd" => Ok(CompressionAlgorithm::Zstd),
+        other => Err(format!("unsupported compression algorithm: {other}")),
     }
 }
 

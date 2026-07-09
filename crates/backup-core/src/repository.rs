@@ -98,6 +98,44 @@ pub struct ArchiveResult {
     pub byte_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionAlgorithm {
+    None,
+    Zstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupOptions {
+    pub compression_algorithm: CompressionAlgorithm,
+}
+
+impl Default for BackupOptions {
+    fn default() -> Self {
+        Self {
+            compression_algorithm: CompressionAlgorithm::None,
+        }
+    }
+}
+
+impl CompressionAlgorithm {
+    fn as_object_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    fn from_object_value(value: &str) -> BackupCoreResult<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(BackupError::InvalidRepository(format!(
+                "invalid compression algorithm: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Repository {
     root: PathBuf,
@@ -355,25 +393,169 @@ pub struct ObjectStore {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObject {
+    pub object_id: ObjectId,
+    pub compression_algorithm: CompressionAlgorithm,
+}
+
 impl ObjectStore {
     pub fn write_object(&self, bytes: &[u8]) -> BackupCoreResult<ObjectId> {
+        self.write_object_with_compression(bytes, CompressionAlgorithm::None)
+            .map(|object| object.object_id)
+    }
+
+    pub fn write_object_with_compression(
+        &self,
+        bytes: &[u8],
+        compression_algorithm: CompressionAlgorithm,
+    ) -> BackupCoreResult<StoredObject> {
         fs::create_dir_all(&self.root)?;
         let object_id = ContentHasher::hash_bytes(bytes);
         let path = self.path_for(&object_id);
-        if !path.exists() {
+        let should_write = if path.exists() {
+            read_object_header(&fs::read(&path)?)?.compression_algorithm != compression_algorithm
+        } else {
+            true
+        };
+        if should_write {
             let mut file = fs::File::create(path)?;
-            file.write_all(bytes)?;
+            file.write_all(&encode_object(bytes, compression_algorithm)?)?;
         }
-        Ok(object_id)
+        Ok(StoredObject {
+            object_id,
+            compression_algorithm,
+        })
     }
 
     pub fn read_object(&self, object_id: &ObjectId) -> BackupCoreResult<Vec<u8>> {
-        Ok(fs::read(self.path_for(object_id))?)
+        decode_object(&fs::read(self.path_for(object_id))?)
     }
 
     fn path_for(&self, object_id: &ObjectId) -> PathBuf {
         self.root.join(object_id.as_str())
     }
+}
+
+const OBJECT_HEADER_MAGIC: &str = "backup-tool object v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObjectHeader {
+    compression_algorithm: CompressionAlgorithm,
+    original_size: u64,
+    payload_size: u64,
+    header_len: usize,
+}
+
+fn encode_object(
+    bytes: &[u8],
+    compression_algorithm: CompressionAlgorithm,
+) -> BackupCoreResult<Vec<u8>> {
+    let payload = match compression_algorithm {
+        CompressionAlgorithm::None => Ok(bytes.to_vec()),
+        CompressionAlgorithm::Zstd => zstd::stream::encode_all(bytes, 3).map_err(BackupError::Io),
+    }?;
+    let header = format!(
+        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
+        compression_algorithm.as_object_value(),
+        bytes.len(),
+        payload.len()
+    );
+    let mut output = Vec::with_capacity(header.len() + payload.len());
+    output.extend_from_slice(header.as_bytes());
+    output.extend_from_slice(&payload);
+    Ok(output)
+}
+
+fn decode_object(bytes: &[u8]) -> BackupCoreResult<Vec<u8>> {
+    let header = read_object_header(bytes)?;
+    let payload = &bytes[header.header_len..];
+    if payload.len() != usize::try_from(header.payload_size).unwrap_or(usize::MAX) {
+        return Err(BackupError::InvalidRepository(format!(
+            "object payload size mismatch: expected {}, got {}",
+            header.payload_size,
+            payload.len()
+        )));
+    }
+
+    let decoded = match header.compression_algorithm {
+        CompressionAlgorithm::None => Ok(payload.to_vec()),
+        CompressionAlgorithm::Zstd => zstd::stream::decode_all(payload).map_err(BackupError::Io),
+    }?;
+    if decoded.len() != usize::try_from(header.original_size).unwrap_or(usize::MAX) {
+        return Err(BackupError::InvalidRepository(format!(
+            "object original size mismatch: expected {}, got {}",
+            header.original_size,
+            decoded.len()
+        )));
+    }
+    Ok(decoded)
+}
+
+fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
+    let separator = find_header_separator(bytes).ok_or_else(|| {
+        BackupError::InvalidRepository("object header terminator is missing".into())
+    })?;
+    let header_len = separator + 2;
+    let header = std::str::from_utf8(&bytes[..separator])
+        .map_err(|_| BackupError::InvalidRepository("object header is not utf-8".into()))?;
+    let mut lines = header.lines();
+    match lines.next() {
+        Some(OBJECT_HEADER_MAGIC) => {}
+        _ => {
+            return Err(BackupError::InvalidRepository(
+                "invalid object magic or version".into(),
+            ))
+        }
+    }
+
+    let mut compression_algorithm = None;
+    let mut original_size = None;
+    let mut payload_size = None;
+    for line in lines {
+        let mut parts = line.splitn(2, '\t');
+        let key = parts.next().unwrap_or_default();
+        let value = parts.next().ok_or_else(|| {
+            BackupError::InvalidRepository(format!("invalid object header line: {line}"))
+        })?;
+        match key {
+            "compression" => {
+                compression_algorithm = Some(CompressionAlgorithm::from_object_value(value)?);
+            }
+            "original_size" => {
+                original_size = Some(value.parse::<u64>().map_err(|_| {
+                    BackupError::InvalidRepository(format!("invalid original size: {value}"))
+                })?);
+            }
+            "payload_size" => {
+                payload_size = Some(value.parse::<u64>().map_err(|_| {
+                    BackupError::InvalidRepository(format!("invalid payload size: {value}"))
+                })?);
+            }
+            _ => {
+                return Err(BackupError::InvalidRepository(format!(
+                    "unknown object header field: {key}"
+                )))
+            }
+        }
+    }
+
+    Ok(ObjectHeader {
+        compression_algorithm: compression_algorithm.ok_or_else(|| {
+            BackupError::InvalidRepository("object compression is missing".into())
+        })?,
+        original_size: original_size.ok_or_else(|| {
+            BackupError::InvalidRepository("object original size is missing".into())
+        })?,
+        payload_size: payload_size.ok_or_else(|| {
+            BackupError::InvalidRepository("object payload size is missing".into())
+        })?,
+        header_len,
+    })
+}
+
+fn find_header_separator(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|window| window == b"\n\n")
 }
 
 pub struct ContentHasher;
@@ -403,10 +585,28 @@ impl RepositoryWriter {
         self.backup_many([source.as_ref().to_path_buf()], filter)
     }
 
+    pub fn backup_with_options(
+        &self,
+        source: impl AsRef<Path>,
+        filter: &BackupFilter,
+        options: BackupOptions,
+    ) -> BackupCoreResult<Snapshot> {
+        self.backup_many_with_options([source.as_ref().to_path_buf()], filter, options)
+    }
+
     pub fn backup_many(
         &self,
         sources: impl IntoIterator<Item = impl Into<PathBuf>>,
         filter: &BackupFilter,
+    ) -> BackupCoreResult<Snapshot> {
+        self.backup_many_with_options(sources, filter, BackupOptions::default())
+    }
+
+    pub fn backup_many_with_options(
+        &self,
+        sources: impl IntoIterator<Item = impl Into<PathBuf>>,
+        filter: &BackupFilter,
+        options: BackupOptions,
     ) -> BackupCoreResult<Snapshot> {
         let raw_sources = sources.into_iter().map(Into::into).collect::<Vec<_>>();
         let normalized = normalize_sources(&raw_sources)?;
@@ -437,6 +637,7 @@ impl RepositoryWriter {
                 filter,
                 &provider,
                 &object_store,
+                options,
                 &mut manifest,
             )?;
         }
@@ -721,6 +922,7 @@ fn scan_into_manifest(
     filter: &BackupFilter,
     provider: &impl FileSystemProvider,
     object_store: &ObjectStore,
+    options: BackupOptions,
     manifest: &mut Manifest,
 ) -> BackupCoreResult<()> {
     for entry in fs::read_dir(current)? {
@@ -741,6 +943,7 @@ fn scan_into_manifest(
                 filter,
                 provider,
                 object_store,
+                options,
                 manifest,
             )?;
             continue;
@@ -763,9 +966,10 @@ fn scan_into_manifest(
         }
 
         let bytes = provider.read_file(&path)?;
-        let object_id = object_store.write_object(&bytes)?;
+        let stored_object =
+            object_store.write_object_with_compression(&bytes, options.compression_algorithm)?;
 
-        manifest.push_entry(source_index, file_entry, Some(object_id));
+        manifest.push_entry(source_index, file_entry, Some(stored_object.object_id));
     }
 
     Ok(())
