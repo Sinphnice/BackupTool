@@ -3,8 +3,8 @@ use crate::dto::{
     RestorePathStrategyDto, RestoreResultDto, SnapshotInfoDto,
 };
 use backup_core::{
-    ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, FileKind, Manifest,
-    Repository, RestoreOptions, SnapshotId,
+    ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, FileKind, Repository,
+    RestoreOptions, SnapshotFile, SnapshotId,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ pub(crate) fn backup(
     destination: String,
     filter: Option<BackupFilterDto>,
     compression_algorithm: Option<String>,
+    snapshot_title: Option<String>,
 ) -> Result<BackupResultDto, String> {
     let compression_algorithm = compression_algorithm_from_input(compression_algorithm)?;
     let sources = paths_from_input(sources, "source")?;
@@ -29,21 +30,23 @@ pub(crate) fn backup(
     let filter = filter.map(Into::into).unwrap_or_default();
     let options = BackupOptions {
         compression_algorithm,
+        snapshot_title,
     };
     let snapshot = repository
         .writer()
         .backup_many_with_options(sources, &filter, options)
         .map_err(|error| error.to_string())?;
-    let manifest = repository
+    let snapshot_file = repository
         .reader()
-        .read_manifest(&snapshot.id)
+        .read_snapshot(&snapshot.id)
         .map_err(|error| error.to_string())?;
-    let summary = summarize_manifest(&manifest);
+    let summary = summarize_snapshot_file(&snapshot_file);
 
     Ok(BackupResultDto {
         file_count: summary.file_count,
         byte_count: summary.byte_count,
         snapshot_id: snapshot.id.as_str().to_string(),
+        snapshot_title: snapshot.title,
         ignored_sources: snapshot
             .ignored_sources
             .iter()
@@ -64,11 +67,11 @@ pub(crate) fn restore(
     let snapshot_id = snapshot_id_from_input(snapshot_id)?;
     let repository = Repository::open(path_from_input(backup_path, "repository")?)
         .map_err(|error| error.to_string())?;
-    let manifest = repository
+    let snapshot_file = repository
         .reader()
-        .read_manifest(&snapshot_id)
+        .read_snapshot(&snapshot_id)
         .map_err(|error| error.to_string())?;
-    let summary = summarize_manifest(&manifest);
+    let summary = summarize_snapshot_file(&snapshot_file);
     let mut options = RestoreOptions::default();
     if let Some(path_strategy) = path_strategy {
         options.path_strategy = path_strategy.into();
@@ -227,9 +230,9 @@ struct OperationSummary {
     byte_count: u64,
 }
 
-fn summarize_manifest(manifest: &Manifest) -> OperationSummary {
+fn summarize_snapshot_file(snapshot_file: &SnapshotFile) -> OperationSummary {
     let mut summary = OperationSummary::default();
-    for entry in &manifest.entries {
+    for entry in &snapshot_file.entries {
         if entry.kind == FileKind::File {
             summary.file_count += 1;
             summary.byte_count += entry.size;

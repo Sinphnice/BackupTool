@@ -12,7 +12,7 @@ TypeScript GUI
         -> Rust backup-core
 ```
 
-当前备份格式采用目录型 repository，而不是简单镜像复制。每次备份生成一个 snapshot manifest，普通文件内容写入 object store；恢复时选择 snapshot，并按恢复路径策略将对象内容还原到目标目录。
+当前备份格式采用目录型 repository，而不是简单镜像复制。每次备份生成一个 snapshot 文件，普通文件内容写入 object store；恢复时选择 snapshot，并按恢复路径策略将对象内容还原到目标目录。
 
 当前已经支持：
 
@@ -52,7 +52,7 @@ BackupTool/
 | --- | --- | --- | --- |
 | GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 目录选择、参数输入、snapshot 选择、结果展示 |
 | 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | 暴露 Tauri command、DTO 转换、路径校验、错误转换 |
-| 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、manifest、object store、恢复策略、tar 归档 |
+| 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、object store、恢复策略、tar 归档 |
 | 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和构建 |
 | 环境脚本 | `scripts/` | PowerShell | 检查 Windows 开发依赖，或单独启动 Vite |
 
@@ -78,7 +78,7 @@ BackupTool/
 Rust 依赖由 Cargo workspace 管理：
 
 - 根目录 `Cargo.toml` 声明 workspace。
-- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包。
+- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包，依赖 `zstd` crate 实现 object 级 zstd 压缩，依赖 `sha2` crate 计算 SHA-256 object id。
 - `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog`。
 
 当前项目不再需要 CMake、MSBuild、C ABI 或 C++ 编译链。
@@ -130,9 +130,29 @@ repository/
 各部分职责：
 
 - `repo.meta`：仓库标识文件，用于判断目录是否为合法 BackupTool repository。
-- `objects/`：保存普通文件内容。对象名由内容 hash 和文件大小组成，相同内容可以复用。
-- `snapshots/`：保存每次备份生成的 manifest，例如 `snapshot-xxxx.manifest`。
+- `objects/`：保存普通文件内容。对象名为原始文件内容的 SHA-256 hash，相同内容可以复用。
+- `snapshots/`：保存每次备份生成的 snapshot 文件，例如 `<seconds>-<nanoseconds>-<sequence>.snapshot`。
 - `indexes/`：当前已创建，主要为后续索引能力预留。
+
+snapshot id 当前由创建时间和同一时间点下的序号组成：
+
+```text
+<unix_seconds>-<nanoseconds_9_digits>-<sequence_3_digits>
+```
+
+snapshot 文件内部使用文本格式，文件头为：
+
+```text
+backup-tool snapshot v1
+```
+
+文件内显式记录：
+
+- `snapshot`：snapshot id。
+- `created`：创建时间的秒、纳秒和 sequence。
+- `title`：本次备份的可选标题，标题为空时表示未设置。
+- `source`：备份源路径及恢复时使用的源根名称。
+- `entry`：目录、文件、符号链接或其他条目的相对路径、大小、时间、object id 和元数据。
 
 一次备份的大致流程：
 
@@ -142,7 +162,7 @@ repository/
     -> 扫描目录树
     -> BackupFilter 判断普通文件是否进入备份
     -> 文件内容写入 objects/
-    -> snapshots/<snapshot-id>.manifest 记录结构和对象引用
+    -> snapshots/<snapshot-id>.snapshot 记录结构、源路径、标题、创建时间和对象引用
     -> 返回 snapshot id、文件数、字节数
 ```
 
@@ -152,7 +172,7 @@ repository/
 用户打开 repository
     -> list_snapshots 读取可用 snapshot
     -> 用户选择 snapshot 和恢复策略
-    -> 读取 manifest
+    -> 读取 snapshot 文件
     -> 从 objects/ 读取对象内容
     -> 按路径策略写入恢复目标目录
 ```
@@ -212,15 +232,19 @@ RepositoryWriter
 
 RepositoryReader
 ├── list_snapshots() -> Vec<SnapshotInfo>
-├── read_manifest(snapshot_id) -> Manifest
+├── read_snapshot(snapshot_id) -> SnapshotFile
 └── restore_with_options(snapshot_id, destination, RestoreOptions)
 
-Manifest
+SnapshotFile
 ├── snapshot_id: SnapshotId
+├── created_unix_seconds
+├── created_nanoseconds
+├── sequence
+├── title
 ├── sources: Vec<SourceInfo>
-└── entries: Vec<ManifestEntry>
+└── entries: Vec<SnapshotEntry>
 
-ManifestEntry
+SnapshotEntry
 ├── source_index
 ├── relative_path
 ├── kind
@@ -382,7 +406,7 @@ target/release/bundle/
 `backup-core` 测试覆盖：
 
 - repository 目录结构创建。
-- snapshot manifest 写入和读取。
+- snapshot 文件写入和读取。
 - 连续备份生成不同 snapshot。
 - 多源备份、重复源去重、父子源去重。
 - 按 snapshot 恢复历史版本。
@@ -445,7 +469,7 @@ just test 通过
 - `none`：默认值，不压缩 payload。
 - `zstd`：使用 zstd 压缩 payload。
 
-`object-id` 始终由原始文件内容计算，不由 object header、压缩后的 payload 或后续可能加入的加密信息计算。这一点很重要：同一份原始文件内容即使采用不同压缩算法，逻辑 object id 也保持一致。
+`object-id` 始终由原始文件内容计算，不由 object header、压缩后的 payload 或后续可能加入的加密信息计算。当前实现使用 SHA-256，object id 是 64 字符小写十六进制 hash，不再附加文件大小后缀。这一点很重要：同一份原始文件内容即使采用不同压缩算法，逻辑 object id 也保持一致。
 
 object 物理路径统一为：
 
@@ -464,12 +488,12 @@ payload_size   <u64>
 <payload bytes>
 ```
 
-压缩算法记录在 object header 中，不记录在 manifest entry 中。压缩和解压只处理空行之后的 payload bytes，不处理 header。若同一 `object-id` 已存在但 header 中的 compression 与本次备份选择不同，会用同一份原始数据按本次算法重新生成 object 并覆盖；由于 object id 对应的原始内容不变，旧 snapshot 仍可恢复出相同文件内容。
+压缩算法记录在 object header 中，不记录在 snapshot entry 中。压缩和解压只处理空行之后的 payload bytes，不处理 header。若同一 `object-id` 已存在但 header 中的 compression 与本次备份选择不同，会用同一份原始数据按本次算法重新生成 object 并覆盖；由于 object id 对应的原始内容不变，旧 snapshot 仍可恢复出相同文件内容。
 
 恢复流程中用户不需要选择压缩算法：
 
 ```text
-manifest entry
+snapshot entry
     -> object_id
     -> ObjectStore 读取 objects/<object-id>
     -> 解析 object header 中的 compression
@@ -479,4 +503,4 @@ manifest entry
 
 tar 导出/导入会保留 `objects/` 下的自描述 object 文件，因此压缩 repository 可以作为 tar 文件迁移到其他系统后再恢复。
 
-后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、manifest、object store、archive、compression、encryption 等核心模型演进。压缩已经具备 object 级 zstd 第一版，后续可继续扩展压缩率统计、压缩等级配置和更多算法。
+后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、object store、archive、compression、encryption 等核心模型演进。压缩已经具备 object 级 zstd 第一版，后续可继续扩展压缩率统计、压缩等级配置和更多算法。

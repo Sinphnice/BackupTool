@@ -8,5 +8,6 @@ name = "backup_core"
 path = "src/lib.rs"
 
 [dependencies]
+sha2 = "0.10"
 tar = "0.4"
 zstd = "0.13"

@@ -25,6 +25,7 @@ pub(crate) struct BackupResultDto {
     pub(crate) file_count: u64,
     pub(crate) byte_count: u64,
     pub(crate) snapshot_id: String,
+    pub(crate) snapshot_title: Option<String>,
     pub(crate) ignored_sources: Vec<String>,
 }
 
@@ -52,6 +53,9 @@ pub(crate) struct SnapshotInfoDto {
     pub(crate) file_count: u64,
     pub(crate) byte_count: u64,
     pub(crate) created_unix_seconds: Option<i64>,
+    pub(crate) created_nanoseconds: Option<u32>,
+    pub(crate) sequence: Option<u16>,
+    pub(crate) title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +103,9 @@ impl From<backup_core::SnapshotInfo> for SnapshotInfoDto {
             file_count: value.file_count,
             byte_count: value.byte_count,
             created_unix_seconds: value.created_unix_seconds,
+            created_nanoseconds: value.created_nanoseconds,
+            sequence: value.sequence,
+            title: value.title,
         }
     }
 }

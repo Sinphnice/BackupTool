@@ -15,8 +15,8 @@ pub use filesystem::{
 };
 pub use repository::{
     ArchiveAlgorithm, ArchiveResult, BackupOptions, CompressionAlgorithm, ContentHasher, FileKind,
-    Manifest, ManifestEntry, ObjectId, ObjectStore, Repository, RepositoryReader, RepositoryWriter,
-    Snapshot, SnapshotId, SnapshotInfo, SourceInfo,
+    ObjectId, ObjectStore, Repository, RepositoryReader, RepositoryWriter, Snapshot, SnapshotEntry,
+    SnapshotFile, SnapshotId, SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]
@@ -27,7 +27,7 @@ pub enum BackupError {
     Io(std::io::Error),
     InvalidModifiedTime(PathBuf),
     InvalidRepository(String),
-    InvalidManifest(String),
+    InvalidSnapshot(String),
     SnapshotDoesNotExist(String),
     EmptySources,
     PathConflict(PathBuf),
@@ -56,7 +56,7 @@ impl Display for BackupError {
                 write!(formatter, "invalid modified time: {}", path.display())
             }
             Self::InvalidRepository(message) => write!(formatter, "invalid repository: {message}"),
-            Self::InvalidManifest(message) => write!(formatter, "invalid manifest: {message}"),
+            Self::InvalidSnapshot(message) => write!(formatter, "invalid snapshot: {message}"),
             Self::SnapshotDoesNotExist(snapshot_id) => {
                 write!(formatter, "snapshot does not exist: {snapshot_id}")
             }

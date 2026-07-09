@@ -6,6 +6,7 @@ type OperationResult = {
   fileCount: number;
   byteCount: number;
   snapshotId?: string;
+  snapshotTitle?: string;
   ignoredSources?: string[];
 };
 
@@ -26,6 +27,9 @@ type SnapshotInfo = {
   fileCount: number;
   byteCount: number;
   createdUnixSeconds?: number;
+  createdNanoseconds?: number;
+  sequence?: number;
+  title?: string;
 };
 
 type ArchiveResult = {
@@ -108,18 +112,20 @@ function collectFilter(): BackupFilter {
 
 function formatOperation(name: string, value: OperationResult): string {
   const snapshot = value.snapshotId ? ` Snapshot: ${value.snapshotId}.` : "";
+  const title = value.snapshotTitle ? ` Title: ${value.snapshotTitle}.` : "";
   const ignored =
     value.ignoredSources && value.ignoredSources.length > 0
       ? ` Ignored ${value.ignoredSources.length} duplicate or nested source paths.`
       : "";
-  return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.${snapshot}${ignored}`;
+  return `${name} succeeded: ${value.fileCount} files, ${value.byteCount} bytes.${snapshot}${title}${ignored}`;
 }
 
 function formatSnapshot(value: SnapshotInfo): string {
   const created = value.createdUnixSeconds
     ? new Date(value.createdUnixSeconds * 1000).toLocaleString()
     : "unknown time";
-  return `${created} | ${value.fileCount} files | ${value.byteCount} bytes | ${value.id}`;
+  const title = value.title || "Untitled";
+  return `${created} | ${title} | ${value.fileCount} files | ${value.byteCount} bytes | ${value.id}`;
 }
 
 function formatArchiveOperation(name: string, value: ArchiveResult): string {
@@ -313,6 +319,7 @@ startBackup.addEventListener("click", async () => {
       destination: inputValue("#backup-destination"),
       filter: collectFilter(),
       compressionAlgorithm: compressionAlgorithm.value,
+      snapshotTitle: inputValue("#snapshot-title"),
     });
     result.textContent = formatOperation("Backup", value);
   } catch (error) {

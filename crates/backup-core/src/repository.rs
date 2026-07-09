@@ -4,6 +4,7 @@ use crate::filesystem::{
     RestoreReport,
 };
 use crate::{BackupCoreResult, BackupError, BackupFilter};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
@@ -13,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 
 const REPOSITORY_META: &str = "backup-tool repository v1\n";
-const MANIFEST_HEADER: &str = "backup-tool manifest v1";
+const SNAPSHOT_HEADER: &str = "backup-tool snapshot v1";
+const SNAPSHOT_TITLE_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SnapshotId(String);
@@ -48,6 +50,10 @@ impl From<String> for ObjectId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub id: SnapshotId,
+    pub created_unix_seconds: i64,
+    pub created_nanoseconds: u32,
+    pub sequence: u16,
+    pub title: Option<String>,
     pub ignored_sources: Vec<PathBuf>,
 }
 
@@ -57,6 +63,9 @@ pub struct SnapshotInfo {
     pub file_count: u64,
     pub byte_count: u64,
     pub created_unix_seconds: Option<i64>,
+    pub created_nanoseconds: Option<u32>,
+    pub sequence: Option<u16>,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +78,7 @@ pub struct SourceInfo {
 pub use crate::filesystem::FileType as FileKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManifestEntry {
+pub struct SnapshotEntry {
     pub source_index: usize,
     pub relative_path: PathBuf,
     pub kind: FileKind,
@@ -80,10 +89,14 @@ pub struct ManifestEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Manifest {
+pub struct SnapshotFile {
     pub snapshot_id: SnapshotId,
+    pub created_unix_seconds: i64,
+    pub created_nanoseconds: u32,
+    pub sequence: u16,
+    pub title: Option<String>,
     pub sources: Vec<SourceInfo>,
-    pub entries: Vec<ManifestEntry>,
+    pub entries: Vec<SnapshotEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,15 +117,17 @@ pub enum CompressionAlgorithm {
     Zstd,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupOptions {
     pub compression_algorithm: CompressionAlgorithm,
+    pub snapshot_title: Option<String>,
 }
 
 impl Default for BackupOptions {
     fn default() -> Self {
         Self {
             compression_algorithm: CompressionAlgorithm::None,
+            snapshot_title: None,
         }
     }
 }
@@ -178,9 +193,9 @@ impl Repository {
         self.root.join("snapshots")
     }
 
-    fn manifest_path(&self, snapshot_id: &SnapshotId) -> PathBuf {
+    fn snapshot_path(&self, snapshot_id: &SnapshotId) -> PathBuf {
         self.snapshots_dir()
-            .join(format!("{}.manifest", snapshot_id.as_str()))
+            .join(format!("{}.snapshot", snapshot_id.as_str()))
     }
 
     pub fn object_store(&self) -> ObjectStore {
@@ -562,18 +577,22 @@ pub struct ContentHasher;
 
 impl ContentHasher {
     pub fn hash_bytes(bytes: &[u8]) -> ObjectId {
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        ObjectId(format!("{hash:016x}-{}", bytes.len()))
+        let hash = Sha256::digest(bytes);
+        ObjectId(format!("{hash:x}"))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RepositoryWriter {
     repository: Repository,
+}
+
+#[derive(Debug, Clone)]
+struct CreatedSnapshot {
+    id: SnapshotId,
+    unix_seconds: i64,
+    nanoseconds: u32,
+    sequence: u16,
 }
 
 impl RepositoryWriter {
@@ -610,10 +629,15 @@ impl RepositoryWriter {
     ) -> BackupCoreResult<Snapshot> {
         let raw_sources = sources.into_iter().map(Into::into).collect::<Vec<_>>();
         let normalized = normalize_sources(&raw_sources)?;
+        let snapshot_title = normalize_snapshot_title(options.snapshot_title)?;
 
-        let snapshot_id = self.create_snapshot_id()?;
-        let mut manifest = Manifest {
-            snapshot_id: snapshot_id.clone(),
+        let created = self.create_snapshot_id()?;
+        let mut snapshot_file = SnapshotFile {
+            snapshot_id: created.id.clone(),
+            created_unix_seconds: created.unix_seconds,
+            created_nanoseconds: created.nanoseconds,
+            sequence: created.sequence,
+            title: snapshot_title.clone(),
             sources: normalized
                 .sources
                 .iter()
@@ -630,39 +654,51 @@ impl RepositoryWriter {
 
         for (source_index, source) in normalized.sources.iter().enumerate() {
             let provider = AutoFileSystemProvider::for_path(source);
-            scan_into_manifest(
+            scan_into_snapshot_file(
                 source,
                 source,
                 source_index,
                 filter,
                 &provider,
                 &object_store,
-                options,
-                &mut manifest,
+                options.compression_algorithm,
+                &mut snapshot_file,
             )?;
         }
 
-        write_manifest(&self.repository.manifest_path(&snapshot_id), &manifest)?;
+        write_snapshot_file(&self.repository.snapshot_path(&created.id), &snapshot_file)?;
 
         Ok(Snapshot {
-            id: snapshot_id,
+            id: created.id,
+            created_unix_seconds: created.unix_seconds,
+            created_nanoseconds: created.nanoseconds,
+            sequence: created.sequence,
+            title: snapshot_title,
             ignored_sources: normalized.ignored_sources,
         })
     }
 
-    fn create_snapshot_id(&self) -> BackupCoreResult<SnapshotId> {
+    fn create_snapshot_id(&self) -> BackupCoreResult<CreatedSnapshot> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
             BackupError::InvalidRepository("system time is before unix epoch".into())
+        })?;
+        let unix_seconds = i64::try_from(now.as_secs()).map_err(|_| {
+            BackupError::InvalidRepository("system time exceeds supported range".into())
         })?;
 
         for sequence in 0..1000_u16 {
             let id = SnapshotId(format!(
-                "snapshot-{}-{:09}-{sequence:03}",
-                now.as_secs(),
+                "{}-{:09}-{sequence:03}",
+                unix_seconds,
                 now.subsec_nanos()
             ));
-            if !self.repository.manifest_path(&id).exists() {
-                return Ok(id);
+            if !self.repository.snapshot_path(&id).exists() {
+                return Ok(CreatedSnapshot {
+                    id,
+                    unix_seconds,
+                    nanoseconds: now.subsec_nanos(),
+                    sequence,
+                });
             }
         }
 
@@ -778,12 +814,12 @@ impl RepositoryReader {
         for entry in fs::read_dir(snapshots_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("manifest") {
+            if path.extension().and_then(|value| value.to_str()) != Some("snapshot") {
                 continue;
             }
 
-            let manifest = read_manifest(&path)?;
-            snapshots.push(SnapshotInfo::from_manifest(&manifest));
+            let snapshot_file = read_snapshot_file(&path)?;
+            snapshots.push(SnapshotInfo::from_snapshot_file(&snapshot_file));
         }
 
         snapshots.sort_by(|left, right| {
@@ -795,14 +831,14 @@ impl RepositoryReader {
         Ok(snapshots)
     }
 
-    pub fn read_manifest(&self, snapshot_id: &SnapshotId) -> BackupCoreResult<Manifest> {
-        let path = self.repository.manifest_path(snapshot_id);
+    pub fn read_snapshot(&self, snapshot_id: &SnapshotId) -> BackupCoreResult<SnapshotFile> {
+        let path = self.repository.snapshot_path(snapshot_id);
         if !path.is_file() {
             return Err(BackupError::SnapshotDoesNotExist(
                 snapshot_id.as_str().to_string(),
             ));
         }
-        read_manifest(&path)
+        read_snapshot_file(&path)
     }
 
     pub fn restore(
@@ -825,17 +861,17 @@ impl RepositoryReader {
             return Err(BackupError::EmptyPath("destination"));
         }
 
-        let manifest = self.read_manifest(snapshot_id)?;
+        let snapshot_file = self.read_snapshot(snapshot_id)?;
         let object_store = self.repository.object_store();
         let writer = AutoFileSystemProvider::for_path(destination);
         let mut report = RestoreReport::default();
-        let is_multi_source = manifest.sources.len() > 1;
-        let source_roots = resolve_source_roots(&manifest, &options)?;
+        let is_multi_source = snapshot_file.sources.len() > 1;
+        let source_roots = resolve_source_roots(&snapshot_file, &options)?;
         fs::create_dir_all(destination)?;
 
-        for entry in &manifest.entries {
+        for entry in &snapshot_file.entries {
             let Some(target) =
-                restore_target_path(destination, &manifest, &source_roots, entry, &options)?
+                restore_target_path(destination, &snapshot_file, &source_roots, entry, &options)?
             else {
                 continue;
             };
@@ -852,7 +888,7 @@ impl RepositoryReader {
                 }
                 FileKind::File => {
                     let object_id = entry.object_id.as_ref().ok_or_else(|| {
-                        BackupError::InvalidManifest(format!(
+                        BackupError::InvalidSnapshot(format!(
                             "file entry missing object id: {}",
                             entry.relative_path.display()
                         ))
@@ -886,10 +922,10 @@ impl RepositoryReader {
 }
 
 impl SnapshotInfo {
-    fn from_manifest(manifest: &Manifest) -> Self {
+    fn from_snapshot_file(snapshot_file: &SnapshotFile) -> Self {
         let mut file_count = 0;
         let mut byte_count = 0;
-        for entry in &manifest.entries {
+        for entry in &snapshot_file.entries {
             if entry.kind == FileKind::File {
                 file_count += 1;
                 byte_count += entry.size;
@@ -897,15 +933,18 @@ impl SnapshotInfo {
         }
 
         Self {
-            id: manifest.snapshot_id.clone(),
+            id: snapshot_file.snapshot_id.clone(),
             file_count,
             byte_count,
-            created_unix_seconds: parse_snapshot_created_unix_seconds(&manifest.snapshot_id),
+            created_unix_seconds: Some(snapshot_file.created_unix_seconds),
+            created_nanoseconds: Some(snapshot_file.created_nanoseconds),
+            sequence: Some(snapshot_file.sequence),
+            title: snapshot_file.title.clone(),
         }
     }
 }
 
-impl ManifestEntry {
+impl SnapshotEntry {
     fn to_file_entry_at(&self, restored_path: &Path) -> FileEntry {
         FileEntry {
             relative_path: restored_path.to_path_buf(),
@@ -915,15 +954,15 @@ impl ManifestEntry {
     }
 }
 
-fn scan_into_manifest(
+fn scan_into_snapshot_file(
     root: &Path,
     current: &Path,
     source_index: usize,
     filter: &BackupFilter,
     provider: &impl FileSystemProvider,
     object_store: &ObjectStore,
-    options: BackupOptions,
-    manifest: &mut Manifest,
+    compression_algorithm: CompressionAlgorithm,
+    snapshot_file: &mut SnapshotFile,
 ) -> BackupCoreResult<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
@@ -931,26 +970,26 @@ fn scan_into_manifest(
         let file_entry = provider.read_entry(root, &path)?;
 
         if file_entry.file_type == FileKind::Directory {
-            manifest.entries.push(ManifestEntry::from_file_entry(
+            snapshot_file.entries.push(SnapshotEntry::from_file_entry(
                 source_index,
                 file_entry.clone(),
                 None,
             ));
-            scan_into_manifest(
+            scan_into_snapshot_file(
                 root,
                 &path,
                 source_index,
                 filter,
                 provider,
                 object_store,
-                options,
-                manifest,
+                compression_algorithm,
+                snapshot_file,
             )?;
             continue;
         }
 
         if file_entry.file_type == FileKind::Symlink || file_entry.file_type == FileKind::Other {
-            manifest.entries.push(ManifestEntry::from_file_entry(
+            snapshot_file.entries.push(SnapshotEntry::from_file_entry(
                 source_index,
                 file_entry,
                 None,
@@ -967,22 +1006,22 @@ fn scan_into_manifest(
 
         let bytes = provider.read_file(&path)?;
         let stored_object =
-            object_store.write_object_with_compression(&bytes, options.compression_algorithm)?;
+            object_store.write_object_with_compression(&bytes, compression_algorithm)?;
 
-        manifest.push_entry(source_index, file_entry, Some(stored_object.object_id));
+        snapshot_file.push_entry(source_index, file_entry, Some(stored_object.object_id));
     }
 
     Ok(())
 }
 
-impl Manifest {
+impl SnapshotFile {
     fn push_entry(
         &mut self,
         source_index: usize,
         file_entry: FileEntry,
         object_id: Option<ObjectId>,
     ) {
-        self.entries.push(ManifestEntry::from_file_entry(
+        self.entries.push(SnapshotEntry::from_file_entry(
             source_index,
             file_entry,
             object_id,
@@ -990,7 +1029,7 @@ impl Manifest {
     }
 }
 
-impl ManifestEntry {
+impl SnapshotEntry {
     fn from_file_entry(
         source_index: usize,
         file_entry: FileEntry,
@@ -1010,16 +1049,16 @@ impl ManifestEntry {
 
 fn restore_target_path(
     destination: &Path,
-    manifest: &Manifest,
+    snapshot_file: &SnapshotFile,
     source_roots: &[Option<PathBuf>],
-    entry: &ManifestEntry,
+    entry: &SnapshotEntry,
     options: &RestoreOptions,
 ) -> BackupCoreResult<Option<PathBuf>> {
     match options.path_strategy {
         RestorePathStrategy::PreserveRelativePath => {
-            if manifest.sources.len() > 1 {
+            if snapshot_file.sources.len() > 1 {
                 let root = source_roots.get(entry.source_index).ok_or_else(|| {
-                    BackupError::InvalidManifest(format!(
+                    BackupError::InvalidSnapshot(format!(
                         "missing restore root for source index: {}",
                         entry.source_index
                     ))
@@ -1033,12 +1072,12 @@ fn restore_target_path(
             }
         }
         RestorePathStrategy::PreserveFullPath => {
-            let source = manifest
+            let source = snapshot_file
                 .sources
                 .iter()
                 .find(|source| source.index == entry.source_index)
                 .ok_or_else(|| {
-                    BackupError::InvalidManifest(format!(
+                    BackupError::InvalidSnapshot(format!(
                         "missing source index: {}",
                         entry.source_index
                     ))
@@ -1054,7 +1093,7 @@ fn restore_target_path(
                 return Ok(Some(destination.to_path_buf()));
             }
             let name = entry.relative_path.file_name().ok_or_else(|| {
-                BackupError::InvalidManifest(format!(
+                BackupError::InvalidSnapshot(format!(
                     "flatten entry missing file name: {}",
                     entry.relative_path.display()
                 ))
@@ -1065,18 +1104,18 @@ fn restore_target_path(
 }
 
 fn resolve_source_roots(
-    manifest: &Manifest,
+    snapshot_file: &SnapshotFile,
     options: &RestoreOptions,
 ) -> BackupCoreResult<Vec<Option<PathBuf>>> {
-    let mut roots = vec![None; manifest.sources.len()];
+    let mut roots = vec![None; snapshot_file.sources.len()];
     if options.path_strategy != RestorePathStrategy::PreserveRelativePath
-        || manifest.sources.len() <= 1
+        || snapshot_file.sources.len() <= 1
     {
         return Ok(roots);
     }
 
     let mut used = HashSet::new();
-    for source in &manifest.sources {
+    for source in &snapshot_file.sources {
         let mut candidate = source.restore_root.clone();
         if candidate.as_os_str().is_empty() {
             candidate = default_restore_root(&source.absolute_path);
@@ -1100,7 +1139,7 @@ fn resolve_source_roots(
         };
 
         if source.index >= roots.len() {
-            return Err(BackupError::InvalidManifest(format!(
+            return Err(BackupError::InvalidSnapshot(format!(
                 "source index out of range: {}",
                 source.index
             )));
@@ -1230,19 +1269,31 @@ fn renamed_path(path: PathBuf) -> BackupCoreResult<PathBuf> {
     Err(BackupError::PathConflict(path))
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
+fn write_snapshot_file(path: &Path, snapshot_file: &SnapshotFile) -> BackupCoreResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let mut output = String::new();
-    output.push_str(MANIFEST_HEADER);
+    output.push_str(SNAPSHOT_HEADER);
     output.push('\n');
     output.push_str("snapshot\t");
-    output.push_str(manifest.snapshot_id.as_str());
+    output.push_str(snapshot_file.snapshot_id.as_str());
+    output.push('\n');
+    output.push_str("created\t");
+    output.push_str(&snapshot_file.created_unix_seconds.to_string());
+    output.push('\t');
+    output.push_str(&snapshot_file.created_nanoseconds.to_string());
+    output.push('\t');
+    output.push_str(&snapshot_file.sequence.to_string());
+    output.push('\n');
+    output.push_str("title\t");
+    if let Some(title) = &snapshot_file.title {
+        output.push_str(&escape_field(title));
+    }
     output.push('\n');
 
-    for source in &manifest.sources {
+    for source in &snapshot_file.sources {
         output.push_str("source\t");
         output.push_str(&source.index.to_string());
         output.push('\t');
@@ -1252,11 +1303,11 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
         output.push('\n');
     }
 
-    for entry in &manifest.entries {
+    for entry in &snapshot_file.entries {
         output.push_str("entry\t");
         output.push_str(&entry.source_index.to_string());
         output.push('\t');
-        output.push_str(entry.kind.as_manifest_value());
+        output.push_str(entry.kind.as_snapshot_value());
         output.push('\t');
         output.push_str(&escape_field(&entry.relative_path.to_string_lossy()));
         output.push('\t');
@@ -1291,7 +1342,7 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
         output.push('\t');
         output.push_str(if entry.metadata.readonly { "1" } else { "0" });
         output.push('\t');
-        output.push_str(platform_manifest_value(&entry.metadata.platform));
+        output.push_str(platform_snapshot_value(&entry.metadata.platform));
         output.push('\n');
     }
 
@@ -1299,27 +1350,53 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> BackupCoreResult<()> {
     Ok(())
 }
 
-fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
+fn read_snapshot_file(path: &Path) -> BackupCoreResult<SnapshotFile> {
     let text = fs::read_to_string(path)?;
     let mut lines = text.lines();
     match lines.next() {
-        Some(MANIFEST_HEADER) => {}
-        _ => return Err(BackupError::InvalidManifest("invalid header".into())),
+        Some(SNAPSHOT_HEADER) => {}
+        _ => return Err(BackupError::InvalidSnapshot("invalid header".into())),
     }
 
     let snapshot_line = lines
         .next()
-        .ok_or_else(|| BackupError::InvalidManifest("missing snapshot line".into()))?;
+        .ok_or_else(|| BackupError::InvalidSnapshot("missing snapshot line".into()))?;
     let mut snapshot_parts = snapshot_line.splitn(2, '\t');
     if snapshot_parts.next() != Some("snapshot") {
-        return Err(BackupError::InvalidManifest("invalid snapshot line".into()));
+        return Err(BackupError::InvalidSnapshot("invalid snapshot line".into()));
     }
     let snapshot_id = SnapshotId(
         snapshot_parts
             .next()
-            .ok_or_else(|| BackupError::InvalidManifest("missing snapshot id".into()))?
+            .ok_or_else(|| BackupError::InvalidSnapshot("missing snapshot id".into()))?
             .to_string(),
     );
+
+    let created_line = lines
+        .next()
+        .ok_or_else(|| BackupError::InvalidSnapshot("missing created line".into()))?;
+    let created_parts = created_line.split('\t').collect::<Vec<_>>();
+    if created_parts.len() != 4 || created_parts.first().copied() != Some("created") {
+        return Err(BackupError::InvalidSnapshot("invalid created line".into()));
+    }
+    let created_unix_seconds = parse_i64(created_parts[1])?;
+    let created_nanoseconds = parse_u32(created_parts[2])?;
+    let sequence = parse_u16(created_parts[3])?;
+
+    let title_line = lines
+        .next()
+        .ok_or_else(|| BackupError::InvalidSnapshot("missing title line".into()))?;
+    let mut title_parts = title_line.splitn(2, '\t');
+    if title_parts.next() != Some("title") {
+        return Err(BackupError::InvalidSnapshot("invalid title line".into()));
+    }
+    let title = normalize_snapshot_title(Some(
+        title_parts
+            .next()
+            .map(unescape_field)
+            .transpose()?
+            .unwrap_or_default(),
+    ))?;
 
     let mut sources = Vec::new();
     let mut entries = Vec::new();
@@ -1328,7 +1405,7 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
         match parts.first().copied() {
             Some("source") => {
                 if parts.len() != 3 && parts.len() != 4 {
-                    return Err(BackupError::InvalidManifest(format!(
+                    return Err(BackupError::InvalidSnapshot(format!(
                         "invalid source line: {line}"
                     )));
                 }
@@ -1340,7 +1417,7 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
                 };
                 sources.push(SourceInfo {
                     index: parts[1].parse::<usize>().map_err(|_| {
-                        BackupError::InvalidManifest(format!("invalid source index: {}", parts[1]))
+                        BackupError::InvalidSnapshot(format!("invalid source index: {}", parts[1]))
                     })?,
                     absolute_path,
                     restore_root,
@@ -1348,64 +1425,42 @@ fn read_manifest(path: &Path) -> BackupCoreResult<Manifest> {
             }
             Some("entry") => entries.push(parse_entry_line(&parts, line)?),
             _ => {
-                return Err(BackupError::InvalidManifest(format!(
-                    "invalid manifest line: {line}"
+                return Err(BackupError::InvalidSnapshot(format!(
+                    "invalid snapshot line: {line}"
                 )))
             }
         }
     }
 
-    if sources.is_empty() {
-        sources.push(SourceInfo {
-            index: 0,
-            absolute_path: PathBuf::from("source-0"),
-            restore_root: PathBuf::from("source-0"),
-        });
-    }
-
-    Ok(Manifest {
+    Ok(SnapshotFile {
         snapshot_id,
+        created_unix_seconds,
+        created_nanoseconds,
+        sequence,
+        title,
         sources,
         entries,
     })
 }
 
-fn parse_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<ManifestEntry> {
+fn parse_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<SnapshotEntry> {
     match parts.len() {
-        6 | 10 => parse_legacy_entry_line(parts, line),
         11 => parse_current_entry_line(parts, line),
-        _ => Err(BackupError::InvalidManifest(format!(
+        _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid entry line: {line}"
         ))),
     }
 }
 
-fn parse_legacy_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<ManifestEntry> {
+fn parse_current_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<SnapshotEntry> {
     if parts.first().copied() != Some("entry") {
-        return Err(BackupError::InvalidManifest(format!(
-            "invalid entry line: {line}"
-        )));
-    }
-    parse_entry_fields(
-        0,
-        parts[1],
-        parts[2],
-        parts[3],
-        parts[4],
-        parts[5],
-        &parts[6..],
-    )
-}
-
-fn parse_current_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<ManifestEntry> {
-    if parts.first().copied() != Some("entry") {
-        return Err(BackupError::InvalidManifest(format!(
+        return Err(BackupError::InvalidSnapshot(format!(
             "invalid entry line: {line}"
         )));
     }
     let source_index = parts[1]
         .parse::<usize>()
-        .map_err(|_| BackupError::InvalidManifest(format!("invalid source index: {}", parts[1])))?;
+        .map_err(|_| BackupError::InvalidSnapshot(format!("invalid source index: {}", parts[1])))?;
     parse_entry_fields(
         source_index,
         parts[2],
@@ -1425,12 +1480,12 @@ fn parse_entry_fields(
     modified: &str,
     object_id: &str,
     extra: &[&str],
-) -> BackupCoreResult<ManifestEntry> {
-    let kind = FileKind::from_manifest_value(kind)?;
+) -> BackupCoreResult<SnapshotEntry> {
+    let kind = FileKind::from_snapshot_value(kind)?;
     let relative_path = PathBuf::from(unescape_field(relative_path)?);
     let size = size
         .parse::<u64>()
-        .map_err(|_| BackupError::InvalidManifest(format!("invalid size: {size}")))?;
+        .map_err(|_| BackupError::InvalidSnapshot(format!("invalid size: {size}")))?;
     let modified_unix_seconds = parse_optional_i64(modified)?;
     let object_id = if object_id.is_empty() {
         None
@@ -1442,7 +1497,7 @@ fn parse_entry_fields(
     let readonly = parse_readonly(extra.get(2).copied().unwrap_or(""))?;
     let platform = parse_platform_metadata(extra.get(3).copied().unwrap_or(""))?;
 
-    Ok(ManifestEntry {
+    Ok(SnapshotEntry {
         source_index,
         relative_path,
         kind,
@@ -1458,16 +1513,6 @@ fn parse_entry_fields(
             platform,
         },
     })
-}
-
-fn parse_snapshot_created_unix_seconds(snapshot_id: &SnapshotId) -> Option<i64> {
-    snapshot_id
-        .as_str()
-        .strip_prefix("snapshot-")?
-        .split('-')
-        .next()?
-        .parse::<i64>()
-        .ok()
 }
 
 fn escape_field(value: &str) -> String {
@@ -1491,21 +1536,39 @@ fn parse_optional_i64(value: &str) -> BackupCoreResult<Option<i64>> {
         value
             .parse::<i64>()
             .map(Some)
-            .map_err(|_| BackupError::InvalidManifest(format!("invalid integer: {value}")))
+            .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
     }
+}
+
+fn parse_i64(value: &str) -> BackupCoreResult<i64> {
+    value
+        .parse::<i64>()
+        .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
+}
+
+fn parse_u32(value: &str) -> BackupCoreResult<u32> {
+    value
+        .parse::<u32>()
+        .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
+}
+
+fn parse_u16(value: &str) -> BackupCoreResult<u16> {
+    value
+        .parse::<u16>()
+        .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
 }
 
 fn parse_readonly(value: &str) -> BackupCoreResult<bool> {
     match value {
         "" | "0" => Ok(false),
         "1" => Ok(true),
-        _ => Err(BackupError::InvalidManifest(format!(
+        _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid readonly value: {value}"
         ))),
     }
 }
 
-fn platform_manifest_value(platform: &PlatformMetadata) -> &'static str {
+fn platform_snapshot_value(platform: &PlatformMetadata) -> &'static str {
     match platform {
         PlatformMetadata::Basic => "basic",
         PlatformMetadata::Windows(_) => "windows",
@@ -1531,7 +1594,7 @@ fn parse_platform_metadata(value: &str) -> BackupCoreResult<PlatformMetadata> {
             is_fifo: false,
             is_device: false,
         })),
-        _ => Err(BackupError::InvalidManifest(format!(
+        _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid platform metadata: {value}"
         ))),
     }
@@ -1552,16 +1615,32 @@ fn unescape_field(value: &str) -> BackupCoreResult<String> {
             Some('n') => unescaped.push('\n'),
             Some('r') => unescaped.push('\r'),
             Some(other) => {
-                return Err(BackupError::InvalidManifest(format!(
+                return Err(BackupError::InvalidSnapshot(format!(
                     "invalid escape sequence: \\{other}"
                 )))
             }
             None => {
-                return Err(BackupError::InvalidManifest(
+                return Err(BackupError::InvalidSnapshot(
                     "unterminated escape sequence".into(),
                 ))
             }
         }
     }
     Ok(unescaped)
+}
+
+fn normalize_snapshot_title(value: Option<String>) -> BackupCoreResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let title = value.trim().to_string();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    if title.chars().count() > SNAPSHOT_TITLE_MAX_CHARS {
+        return Err(BackupError::InvalidSnapshot(format!(
+            "snapshot title must be at most {SNAPSHOT_TITLE_MAX_CHARS} characters"
+        )));
+    }
+    Ok(Some(title))
 }

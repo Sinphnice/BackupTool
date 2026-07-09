@@ -19,10 +19,12 @@ fn backup_and_restore_round_trip_regular_files() {
         repository_dir.to_string_lossy().into_owned(),
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(backup_result.file_count, 3);
-    assert!(backup_result.snapshot_id.starts_with("snapshot-"));
+    assert!(!backup_result.snapshot_id.starts_with("snapshot-"));
+    assert_eq!(backup_result.snapshot_id.split('-').count(), 3);
 
     let restore_result = restore(
         repository_dir.to_string_lossy().into_owned(),
@@ -72,6 +74,7 @@ fn backup_applies_extension_filter() {
             modified_before: None,
         }),
         None,
+        None,
     )
     .unwrap();
 
@@ -101,12 +104,14 @@ fn list_snapshots_returns_repository_snapshot_summaries() {
         repository_dir.to_string_lossy().into_owned(),
         None,
         None,
+        Some("first title".to_string()),
     )
     .unwrap();
     fs::write(source.join("b.txt"), "beta").unwrap();
     let second = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -119,7 +124,10 @@ fn list_snapshots_returns_repository_snapshot_summaries() {
     assert_eq!(snapshots[0].file_count, 2);
     assert_eq!(snapshots[0].byte_count, 9);
     assert!(snapshots[0].created_unix_seconds.is_some());
+    assert!(snapshots[0].created_nanoseconds.is_some());
+    assert!(snapshots[0].sequence.is_some());
     assert_eq!(snapshots[1].id, first.snapshot_id);
+    assert_eq!(snapshots[1].title.as_deref(), Some("first title"));
 }
 
 #[test]
@@ -127,6 +135,7 @@ fn backup_returns_core_error_as_string() {
     let error = backup(
         vec!["Z:\\definitely\\missing\\backup-tool-source".to_string()],
         "unused".to_string(),
+        None,
         None,
         None,
     )
@@ -148,6 +157,7 @@ fn backup_rejects_non_empty_non_repository_destination() {
     let error = backup(
         vec![source.to_string_lossy().into_owned()],
         destination.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -175,7 +185,7 @@ fn restore_requires_snapshot_id() {
 
 #[test]
 fn backup_requires_at_least_one_source() {
-    let error = backup(Vec::new(), "unused".to_string(), None, None).unwrap_err();
+    let error = backup(Vec::new(), "unused".to_string(), None, None, None).unwrap_err();
 
     assert!(error.contains("at least one source path is required"));
 }
@@ -198,6 +208,7 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
             source_b.to_string_lossy().into_owned(),
         ],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -231,6 +242,7 @@ fn backup_command_accepts_zstd_compression_and_restore_decompresses() {
         repository_dir.to_string_lossy().into_owned(),
         None,
         Some("zstd".to_string()),
+        None,
     )
     .unwrap();
     let object_path = fs::read_dir(repository_dir.join("objects"))
@@ -266,6 +278,7 @@ fn backup_command_rejects_unknown_compression_algorithm() {
         "unused".to_string(),
         None,
         Some("brotli".to_string()),
+        None,
     )
     .unwrap_err();
 
@@ -286,6 +299,7 @@ fn export_and_import_repository_commands_round_trip_tar() {
     let backup_result = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -346,6 +360,7 @@ fn import_repository_command_rejects_non_empty_destination() {
     backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )

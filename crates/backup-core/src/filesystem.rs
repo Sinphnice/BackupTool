@@ -12,7 +12,7 @@ pub enum FileType {
 }
 
 impl FileType {
-    pub(crate) fn as_manifest_value(self) -> &'static str {
+    pub(crate) fn as_snapshot_value(self) -> &'static str {
         match self {
             Self::Directory => "dir",
             Self::File => "file",
@@ -21,13 +21,13 @@ impl FileType {
         }
     }
 
-    pub(crate) fn from_manifest_value(value: &str) -> BackupCoreResult<Self> {
+    pub(crate) fn from_snapshot_value(value: &str) -> BackupCoreResult<Self> {
         match value {
             "dir" => Ok(Self::Directory),
             "file" => Ok(Self::File),
             "symlink" => Ok(Self::Symlink),
             "other" => Ok(Self::Other),
-            _ => Err(BackupError::InvalidManifest(format!(
+            _ => Err(BackupError::InvalidSnapshot(format!(
                 "unknown file type: {value}"
             ))),
         }

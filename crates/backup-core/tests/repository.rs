@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn creates_repository_layout_and_snapshot_manifest() {
+fn creates_repository_layout_and_snapshot_file() {
     let root = TestDir::new("repo_layout");
     let repository_path = root.path.join("repository");
     let source = root.path.join("source");
@@ -20,7 +20,7 @@ fn creates_repository_layout_and_snapshot_manifest() {
         .writer()
         .backup(&source, &BackupFilter::default())
         .unwrap();
-    let manifest = repository.reader().read_manifest(&snapshot.id).unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
 
     assert!(repository_path.join("repo.meta").is_file());
     assert!(repository_path.join("snapshots").is_dir());
@@ -28,19 +28,94 @@ fn creates_repository_layout_and_snapshot_manifest() {
     assert!(repository_path.join("indexes").is_dir());
     assert!(repository_path
         .join("snapshots")
-        .join(format!("{}.manifest", snapshot.id.as_str()))
+        .join(format!("{}.snapshot", snapshot.id.as_str()))
         .is_file());
-    assert!(manifest
+    assert!(!snapshot.id.as_str().starts_with("snapshot-"));
+    assert_eq!(snapshot.id.as_str().split('-').count(), 3);
+    assert_eq!(
+        snapshot_file.created_unix_seconds,
+        snapshot.created_unix_seconds
+    );
+    assert_eq!(
+        snapshot_file.created_nanoseconds,
+        snapshot.created_nanoseconds
+    );
+    assert_eq!(snapshot_file.sequence, snapshot.sequence);
+    let text = fs::read_to_string(
+        repository_path
+            .join("snapshots")
+            .join(format!("{}.snapshot", snapshot.id.as_str())),
+    )
+    .unwrap();
+    assert!(text.starts_with("backup-tool snapshot v1\n"));
+    assert!(text.contains(&format!(
+        "created\t{}\t{}\t{}",
+        snapshot.created_unix_seconds, snapshot.created_nanoseconds, snapshot.sequence
+    )));
+    assert!(snapshot_file
         .entries
         .iter()
         .any(|entry| entry.kind == FileKind::Directory
             && entry.relative_path == PathBuf::from("dir")));
-    assert!(manifest.entries.iter().any(|entry| {
+    assert!(snapshot_file.entries.iter().any(|entry| {
         entry.kind == FileKind::File
             && entry.relative_path == PathBuf::from("dir").join("a.txt")
             && entry.size == 5
             && entry.object_id.is_some()
     }));
+}
+
+#[test]
+fn snapshot_title_is_stored_and_validated() {
+    let root = TestDir::new("repo_snapshot_title");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                snapshot_title: Some("  每日备份 title  ".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+    assert_eq!(snapshot.title.as_deref(), Some("每日备份 title"));
+    assert_eq!(snapshot_file.title.as_deref(), Some("每日备份 title"));
+
+    let empty_title = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                snapshot_title: Some("   ".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(empty_title.title, None);
+
+    let error = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                snapshot_title: Some("x".repeat(121)),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("snapshot title must be at most 120 characters"));
 }
 
 #[test]
@@ -106,8 +181,8 @@ fn multi_source_backup_restores_under_source_root_names_by_default() {
         .writer()
         .backup_many([&source_a, &source_b], &BackupFilter::default())
         .unwrap();
-    let manifest = repository.reader().read_manifest(&snapshot.id).unwrap();
-    assert_eq!(manifest.sources.len(), 2);
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+    assert_eq!(snapshot_file.sources.len(), 2);
 
     repository.reader().restore(&snapshot.id, &restore).unwrap();
 
@@ -220,12 +295,12 @@ fn backup_many_deduplicates_child_sources() {
         .writer()
         .backup_many([&source, &child, &source], &BackupFilter::default())
         .unwrap();
-    let manifest = repository.reader().read_manifest(&snapshot.id).unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
 
-    assert_eq!(manifest.sources.len(), 1);
+    assert_eq!(snapshot_file.sources.len(), 1);
     assert_eq!(snapshot.ignored_sources.len(), 2);
     assert_eq!(
-        manifest
+        snapshot_file
             .entries
             .iter()
             .filter(|entry| entry.kind == FileKind::File)
@@ -360,7 +435,7 @@ fn flatten_conflict_rename_keeps_all_files() {
 }
 
 #[test]
-fn lists_snapshot_summary_from_repository_manifests() {
+fn lists_snapshot_summary_from_repository_snapshot_files() {
     let root = TestDir::new("repo_list_snapshots");
     let repository = Repository::init(root.path.join("repository")).unwrap();
     let source = root.path.join("source");
@@ -425,7 +500,7 @@ fn missing_snapshot_returns_error() {
     let repository = Repository::init(root.path.join("repository")).unwrap();
     let error = repository
         .reader()
-        .read_manifest(&SnapshotId::from("missing".to_string()))
+        .read_snapshot(&SnapshotId::from("missing".to_string()))
         .unwrap_err();
 
     assert!(error.is_snapshot_missing());
@@ -634,11 +709,12 @@ fn zstd_backup_stores_compressed_object_and_restores_original_content() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
-    let manifest = repository.reader().read_manifest(&snapshot.id).unwrap();
-    let file_entries = manifest
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+    let file_entries = snapshot_file
         .entries
         .iter()
         .filter(|entry| entry.kind == FileKind::File)
@@ -646,6 +722,12 @@ fn zstd_backup_stores_compressed_object_and_restores_original_content() {
     assert_eq!(file_entries.len(), 3);
     for entry in file_entries {
         let object_id = entry.object_id.as_ref().unwrap();
+        assert_eq!(object_id.as_str().len(), 64);
+        assert!(object_id
+            .as_str()
+            .chars()
+            .all(|value| value.is_ascii_hexdigit()));
+        assert!(!object_id.as_str().contains('-'));
         let object_path = repository_path.join("objects").join(object_id.as_str());
         assert!(object_path.exists());
         assert!(object_header_text(&object_path).contains("compression\tzstd"));
@@ -683,11 +765,11 @@ fn object_id_uses_original_content_not_compressed_bytes() {
         .writer()
         .backup(&source, &BackupFilter::default())
         .unwrap();
-    let none_manifest = none_repository
+    let none_snapshot_file = none_repository
         .reader()
-        .read_manifest(&none_snapshot.id)
+        .read_snapshot(&none_snapshot.id)
         .unwrap();
-    let none_object = none_manifest
+    let none_object = none_snapshot_file
         .entries
         .iter()
         .find(|entry| entry.kind == FileKind::File)
@@ -704,14 +786,15 @@ fn object_id_uses_original_content_not_compressed_bytes() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
-    let zstd_manifest = zstd_repository
+    let zstd_snapshot_file = zstd_repository
         .reader()
-        .read_manifest(&zstd_snapshot.id)
+        .read_snapshot(&zstd_snapshot.id)
         .unwrap();
-    let zstd_object = zstd_manifest
+    let zstd_object = zstd_snapshot_file
         .entries
         .iter()
         .find(|entry| entry.kind == FileKind::File)
@@ -761,6 +844,7 @@ fn tar_export_import_preserves_zstd_objects() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -782,12 +866,12 @@ fn tar_export_import_preserves_zstd_objects() {
 }
 
 #[test]
-fn manifest_entry_does_not_store_compression_algorithm() {
-    let root = TestDir::new("repo_manifest_no_compression");
+fn snapshot_entry_does_not_store_compression_algorithm() {
+    let root = TestDir::new("repo_snapshot_no_compression");
     let repository_path = root.path.join("repository");
     let source = root.path.join("source");
     fs::create_dir_all(&source).unwrap();
-    fs::write(source.join("a.txt"), "manifest").unwrap();
+    fs::write(source.join("a.txt"), "snapshot").unwrap();
 
     let repository = Repository::init(&repository_path).unwrap();
     let snapshot = repository
@@ -797,13 +881,14 @@ fn manifest_entry_does_not_store_compression_algorithm() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
-    let manifest_path = repository_path
+    let snapshot_path = repository_path
         .join("snapshots")
-        .join(format!("{}.manifest", snapshot.id.as_str()));
-    let text = fs::read_to_string(&manifest_path).unwrap();
+        .join(format!("{}.snapshot", snapshot.id.as_str()));
+    let text = fs::read_to_string(&snapshot_path).unwrap();
 
     for line in text.lines().filter(|line| line.starts_with("entry\t")) {
         assert_eq!(line.split('\t').count(), 11);
@@ -840,6 +925,7 @@ fn same_object_id_is_rewritten_when_compression_algorithm_changes() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -885,6 +971,7 @@ fn same_object_id_can_be_rewritten_back_to_uncompressed() {
             &BackupFilter::default(),
             BackupOptions {
                 compression_algorithm: CompressionAlgorithm::Zstd,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1118,7 +1205,7 @@ fn first_file_object_id(
 ) -> backup_core::ObjectId {
     repository
         .reader()
-        .read_manifest(snapshot_id)
+        .read_snapshot(snapshot_id)
         .unwrap()
         .entries
         .iter()
