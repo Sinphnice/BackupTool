@@ -1,6 +1,7 @@
 use crate::dto::{
     ArchiveResultDto, BackupFilterDto, BackupResultDto, FlattenConflictStrategyDto,
-    RestorePathStrategyDto, RestoreResultDto, SnapshotInfoDto,
+    RepositoryInfoDto, RestorePathStrategyDto, RestoreResultDto, SnapshotDeleteResultDto,
+    SnapshotInfoDto,
 };
 use backup_core::{
     ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, EncryptionAlgorithm,
@@ -8,6 +9,37 @@ use backup_core::{
 };
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[tauri::command]
+pub(crate) fn create_repository(
+    parent_path: String,
+    name: String,
+) -> Result<RepositoryInfoDto, String> {
+    let parent = path_from_input(parent_path, "repository parent")?;
+    if !parent.is_dir() {
+        return Err(format!(
+            "repository parent is not a directory: {}",
+            parent.display()
+        ));
+    }
+    let name = validate_repository_name(&name)?;
+    let target = parent.join(name);
+    if target.exists() {
+        return Err(format!(
+            "repository path already exists: {}",
+            target.display()
+        ));
+    }
+    let repository = Repository::init(target).map_err(|error| error.to_string())?;
+    repository_info(&repository)
+}
+
+#[tauri::command]
+pub(crate) fn open_repository(repository_path: String) -> Result<RepositoryInfoDto, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository_info(&repository)
+}
 
 /// 从 GUI 命令层启动一次同步 repository 备份。
 ///
@@ -115,6 +147,20 @@ pub(crate) fn list_snapshots(repository_path: String) -> Result<Vec<SnapshotInfo
 }
 
 #[tauri::command]
+pub(crate) fn delete_snapshot(
+    repository_path: String,
+    snapshot_id: String,
+) -> Result<SnapshotDeleteResultDto, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .writer()
+        .delete_snapshot(&snapshot_id_from_input(snapshot_id)?)
+        .map(Into::into)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn export_repository(
     repository_path: String,
     archive_path: String,
@@ -169,6 +215,88 @@ fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
     }
 
     Repository::init(path).map_err(|error| error.to_string())
+}
+
+fn repository_info(repository: &Repository) -> Result<RepositoryInfoDto, String> {
+    let path = clean_canonical_path(
+        fs::canonicalize(repository.root()).map_err(|error| error.to_string())?,
+    );
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.display().to_string());
+    Ok(RepositoryInfoDto {
+        path: path.display().to_string(),
+        name,
+    })
+}
+
+fn clean_canonical_path(path: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return path;
+    }
+    let value = path.to_string_lossy().into_owned();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    value
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or(path)
+}
+
+fn validate_repository_name(value: &str) -> Result<&str, String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("repository name must not be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err("repository name must not be '.' or '..'".to_string());
+    }
+    if name.ends_with([' ', '.'])
+        || name
+            .chars()
+            .any(|value| value.is_control() || "<>:\"/\\|?*".contains(value))
+    {
+        return Err(format!(
+            "repository name contains invalid characters: {name}"
+        ));
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err(format!("repository name is reserved by Windows: {name}"));
+    }
+    Ok(name)
 }
 
 fn ensure_source_directory(path: &Path) -> Result<(), String> {

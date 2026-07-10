@@ -1,7 +1,54 @@
-use crate::commands::{backup, export_repository, import_repository, list_snapshots, restore};
+use crate::commands::{
+    backup, create_repository, delete_snapshot, export_repository, import_repository,
+    list_snapshots, open_repository, restore,
+};
 use crate::dto::{BackupFilterDto, FlattenConflictStrategyDto, RestorePathStrategyDto};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn create_and_open_repository_return_canonical_repository_info() {
+    let root = TestDir::new("tauri_create_repository");
+
+    let created = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "Project Backup".to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(created.name, "Project Backup");
+    assert!(std::path::Path::new(&created.path).is_absolute());
+    assert!(!created.path.starts_with(r"\\?\"));
+    assert!(std::path::Path::new(&created.path)
+        .join("repo.meta")
+        .is_file());
+    let opened = open_repository(created.path.clone()).unwrap();
+    assert_eq!(opened.path, created.path);
+    assert_eq!(opened.name, created.name);
+}
+
+#[test]
+fn create_repository_rejects_invalid_names_and_existing_targets() {
+    let root = TestDir::new("tauri_create_repository_invalid");
+
+    for name in ["", "..", "bad/name", "CON", "trailing."] {
+        assert!(
+            create_repository(root.path.to_string_lossy().into_owned(), name.to_string()).is_err()
+        );
+    }
+
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "existing".to_string(),
+    )
+    .unwrap();
+    let error = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "existing".to_string(),
+    )
+    .unwrap_err();
+    assert!(error.contains("already exists"));
+}
 
 #[test]
 fn backup_and_restore_round_trip_regular_files() {
@@ -138,6 +185,41 @@ fn list_snapshots_returns_repository_snapshot_summaries() {
     assert!(snapshots[0].sequence.is_some());
     assert_eq!(snapshots[1].id, first.snapshot_id);
     assert_eq!(snapshots[1].title.as_deref(), Some("first title"));
+}
+
+#[test]
+fn delete_snapshot_command_returns_cleanup_summary() {
+    let root = TestDir::new("tauri_delete_snapshot");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+    let snapshot = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let result = delete_snapshot(
+        repository_dir.to_string_lossy().into_owned(),
+        snapshot.snapshot_id.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(result.snapshot_id, snapshot.snapshot_id);
+    assert_eq!(result.deleted_object_count, 1);
+    assert!(result.reclaimed_bytes > 0);
+    assert!(result.warnings.is_empty());
+    assert!(
+        list_snapshots(repository_dir.to_string_lossy().into_owned())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

@@ -20,6 +20,7 @@ rust-check:
     cargo check --workspace
 
 test:
+    pnpm.cmd test
     cargo test --workspace
 
 check: frontend-check rust-check

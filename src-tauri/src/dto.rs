@@ -45,6 +45,22 @@ pub(crate) struct ArchiveResultDto {
     pub(crate) byte_count: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepositoryInfoDto {
+    pub(crate) path: String,
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SnapshotDeleteResultDto {
+    pub(crate) snapshot_id: String,
+    pub(crate) deleted_object_count: u64,
+    pub(crate) reclaimed_bytes: u64,
+    pub(crate) warnings: Vec<String>,
+}
+
 /// GUI 鍔犺浇 repository 鏃惰繑鍥炵殑 snapshot 鎽樿銆?
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +134,17 @@ impl From<backup_core::ArchiveResult> for ArchiveResultDto {
             },
             path: value.path.display().to_string(),
             byte_count: value.byte_count,
+        }
+    }
+}
+
+impl From<backup_core::SnapshotDeleteResult> for SnapshotDeleteResultDto {
+    fn from(value: backup_core::SnapshotDeleteResult) -> Self {
+        Self {
+            snapshot_id: value.snapshot_id.as_str().to_string(),
+            deleted_object_count: value.deleted_object_count,
+            reclaimed_bytes: value.reclaimed_bytes,
+            warnings: value.warnings,
         }
     }
 }

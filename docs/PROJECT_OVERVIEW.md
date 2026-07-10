@@ -19,7 +19,9 @@ TypeScript GUI
 - 多源目录备份。
 - 源路径规范化、去重、父子目录去重。
 - repository 初始化、打开、备份、恢复。
-- snapshot 列表读取和 GUI 选择。
+- 仓库中心化 GUI：新建、打开、导入、置顶、归档和仓库切换。
+- 每个仓库独立的快照工作区：添加快照、导出仓库、选择快照恢复。
+- snapshot 列表读取、快照删除和未引用 object 清理。
 - 路径、扩展名、文件名、文件大小、修改时间筛选。
 - 三种恢复路径策略：`PreserveFullPath`、`PreserveRelativePath`、`Flatten`。
 - `Flatten` 冲突策略：`Error`、`Skip`、`Overwrite`、`Rename`。
@@ -33,7 +35,7 @@ TypeScript GUI
 
 ```text
 BackupTool/
-├── src/                    # 前端界面：TypeScript / HTML / CSS
+├── src/                    # 前端界面、状态、API 和视图：TypeScript / HTML / CSS
 ├── src-tauri/              # Tauri 桌面应用层：command、DTO、权限、窗口配置
 ├── crates/
 │   └── backup-core/        # 纯 Rust 备份核心库
@@ -50,7 +52,7 @@ BackupTool/
 
 | 层次 | 路径 | 技术 | 职责 |
 | --- | --- | --- | --- |
-| GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 目录选择、参数输入、snapshot 选择、结果展示 |
+| GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 仓库侧栏、工作区路由、参数输入、snapshot 选择、结果展示 |
 | 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | 暴露 Tauri command、DTO 转换、路径校验、错误转换 |
 | 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、object store、恢复策略、tar 归档 |
 | 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和构建 |
@@ -71,15 +73,17 @@ BackupTool/
 
 - `@tauri-apps/api`：前端调用 Tauri command。
 - `@tauri-apps/plugin-dialog`：目录和文件选择对话框。
+- `@tauri-apps/plugin-store`：保存仓库列表、侧栏布局和非敏感工作区草稿。
 - `@tauri-apps/cli`：Tauri 开发运行和打包。
 - `typescript`：类型检查。
 - `vite`：前端开发服务和静态资源构建。
+- `vitest`：前端状态模型测试。
 
 Rust 依赖由 Cargo workspace 管理：
 
 - 根目录 `Cargo.toml` 声明 workspace。
 - `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包，依赖 `zstd` crate 实现 object 级 zstd 压缩，依赖 `aes-gcm` 和 `argon2` 实现 object payload 加密，依赖 `sha2` crate 计算 SHA-256 object id。
-- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog`。
+- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog` 和 `tauri-plugin-store`。
 
 当前项目不再需要 CMake、MSBuild、C ABI 或 C++ 编译链。
 
@@ -101,8 +105,9 @@ backup-core 核心层
 实际调用路径：
 
 ```text
-src/main.ts
-    -> invoke("backup" / "restore" / "list_snapshots" / "export_repository" / "import_repository")
+src/main.ts -> src/api.ts
+    -> invoke("create_repository" / "open_repository" / "backup" / "restore"
+              / "list_snapshots" / "delete_snapshot" / "export_repository" / "import_repository")
         -> src-tauri/src/commands.rs
             -> crates/backup-core
 ```
@@ -130,7 +135,7 @@ repository/
 各部分职责：
 
 - `repo.meta`：仓库标识文件，用于判断目录是否为合法 BackupTool repository。
-- `objects/`：保存普通文件内容。对象名为原始文件内容的 SHA-256 hash，相同内容可以复用。
+- `objects/`：保存普通文件内容。对象名为原始文件内容的 SHA-256 hash 加存储加密状态后缀：`<content-hash>-plain` 或 `<content-hash>-encrypted`。相同内容且加密状态相同的文件可以复用，明文和密文 object 可以同时存在。
 - `snapshots/`：保存每次备份生成的 snapshot 文件，例如 `<seconds>-<nanoseconds>-<sequence>.snapshot`。
 - `indexes/`：当前已创建，主要为后续索引能力预留。
 
@@ -169,7 +174,7 @@ backup-tool snapshot v1
 一次恢复的大致流程：
 
 ```text
-用户打开 repository
+用户从侧栏选择 repository
     -> list_snapshots 读取可用 snapshot
     -> 用户选择 snapshot 和恢复策略
     -> 读取 snapshot 文件
@@ -208,6 +213,9 @@ repository.tar
 对应 Tauri command：
 
 ```text
+create_repository(parent_path, name)
+open_repository(repository_path)
+delete_snapshot(repository_path, snapshot_id)
 export_repository(repository_path, archive_path, algorithm?)
 import_repository(archive_path, destination, algorithm?)
 ```
@@ -228,7 +236,8 @@ Repository
 └── import_archive(archive_file, destination, ArchiveAlgorithm)
 
 RepositoryWriter
-└── backup_many(sources, filter) -> Snapshot
+├── backup_many(sources, filter) -> Snapshot
+└── delete_snapshot(snapshot_id) -> SnapshotDeleteResult
 
 RepositoryReader
 ├── list_snapshots() -> Vec<SnapshotInfo>
@@ -269,22 +278,25 @@ RestoreOptions
 
 Tauri DTO 位于 `src-tauri/src/dto.rs`：
 
+- `RepositoryInfoDto`：仓库规范化路径和显示名称。
 - `BackupFilterDto`：前端筛选条件。
 - `BackupResultDto`：备份结果。
 - `RestoreResultDto`：恢复结果。
 - `SnapshotInfoDto`：snapshot 列表展示数据。
+- `SnapshotDeleteResultDto`：快照删除和 object 回收结果。
 - `ArchiveResultDto`：仓库导出/导入结果。
 
 ## 8. GUI 功能入口
 
-当前 GUI 主要分为四块：
+当前 GUI 以 repository 为根组织：
 
-- `Backup`：添加一个或多个源目录，选择 repository 目录，执行备份。
-- `Filters`：配置路径、扩展名、文件名、大小、修改时间筛选。
-- `Restore`：打开 repository，自动加载 snapshot，选择恢复路径策略和目标目录。
-- `Repository Archive`：导出 repository 为 `.tar`，或从 `.tar` 导入 repository。
+- 左侧仓库侧栏：新建、打开、导入、置顶、归档和切换仓库；侧栏宽度可以拖动调整。
+- 仓库主页：显示仓库信息、添加快照、导出仓库和快照列表。
+- `Add Snapshot` 页面：固定当前仓库，包含多源目录、压缩、加密、标题和高级筛选。
+- `Export Repository` 页面：固定当前仓库，导出为 tar。
+- `Restore Snapshot` 页面：固定当前仓库和 snapshot，只选择恢复目录、路径策略、冲突策略和密码。
 
-GUI 只负责收集参数和展示结果，不直接操作 repository 文件结构。
+GUI 通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；密码只保留在当前页面内存中，不写入 Store 或 repository。
 
 ## 9. 环境配置
 
@@ -348,6 +360,7 @@ just test
 内部执行：
 
 ```text
+pnpm.cmd test
 cargo test --workspace
 ```
 
@@ -416,17 +429,27 @@ target/release/bundle/
 - repository 导出 tar、导入 tar、导入后恢复。
 - 非 repository 导出失败。
 - 导入到非空目录失败。
+- 删除快照时保留共享 object，清理未引用 object，并报告清理 warning。
 
 Tauri command 层测试覆盖：
 
 - `backup` command。
 - `restore` command。
+- `create_repository` 和 `open_repository` command。
 - `list_snapshots` command。
+- `delete_snapshot` command。
 - `export_repository` command。
 - `import_repository` command。
 - DTO 转换和错误字符串返回。
 - 未知归档算法错误。
 - 非空导入目标错误。
+
+前端状态测试覆盖：
+
+- 仓库路径去重、归档后重新打开和置顶排序。
+- 不同仓库的工作区草稿隔离。
+- 已删除 snapshot 的恢复页面回退到仓库主页。
+- 密码不会进入持久化状态。
 
 提交前建议至少运行：
 

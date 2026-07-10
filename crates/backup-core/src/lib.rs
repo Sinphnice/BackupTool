@@ -16,7 +16,8 @@ pub use filesystem::{
 pub use repository::{
     ArchiveAlgorithm, ArchiveResult, BackupOptions, CompressionAlgorithm, ContentHasher,
     EncryptionAlgorithm, FileKind, ObjectId, ObjectStore, Repository, RepositoryReader,
-    RepositoryWriter, Snapshot, SnapshotEntry, SnapshotFile, SnapshotId, SnapshotInfo, SourceInfo,
+    RepositoryWriter, Snapshot, SnapshotDeleteResult, SnapshotEntry, SnapshotFile, SnapshotId,
+    SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]

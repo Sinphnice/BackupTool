@@ -17,3 +17,4 @@ backup-core = { path = "../crates/backup-core" }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-store = "2.4.3"

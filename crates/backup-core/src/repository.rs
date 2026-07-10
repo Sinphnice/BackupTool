@@ -97,6 +97,14 @@ pub struct SnapshotInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDeleteResult {
+    pub snapshot_id: SnapshotId,
+    pub deleted_object_count: u64,
+    pub reclaimed_bytes: u64,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
     pub index: usize,
     pub absolute_path: PathBuf,
@@ -969,6 +977,73 @@ impl RepositoryWriter {
         })
     }
 
+    pub fn delete_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> BackupCoreResult<SnapshotDeleteResult> {
+        let target_path = self.repository.snapshot_path(snapshot_id);
+        if !target_path.is_file() {
+            return Err(BackupError::SnapshotDoesNotExist(
+                snapshot_id.as_str().to_string(),
+            ));
+        }
+
+        let target = read_snapshot_file(&target_path)?;
+        let target_objects = snapshot_object_ids(&target)?;
+        let mut remaining_objects = HashSet::new();
+        for entry in fs::read_dir(self.repository.snapshots_dir())? {
+            let path = entry?.path();
+            if path == target_path
+                || path.extension().and_then(|value| value.to_str()) != Some("snapshot")
+            {
+                continue;
+            }
+            remaining_objects.extend(snapshot_object_ids(&read_snapshot_file(&path)?)?);
+        }
+
+        fs::remove_file(&target_path)?;
+
+        let object_store = self.repository.object_store();
+        let mut result = SnapshotDeleteResult {
+            snapshot_id: snapshot_id.clone(),
+            deleted_object_count: 0,
+            reclaimed_bytes: 0,
+            warnings: Vec::new(),
+        };
+        for object_id in target_objects.difference(&remaining_objects) {
+            let path = object_store.path_for(object_id);
+            let size = match fs::metadata(&path) {
+                Ok(metadata) => metadata.len(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    result.warnings.push(format!(
+                        "object was already missing: {}",
+                        object_id.as_str()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    result.warnings.push(format!(
+                        "failed to inspect object {}: {error}",
+                        object_id.as_str()
+                    ));
+                    continue;
+                }
+            };
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    result.deleted_object_count += 1;
+                    result.reclaimed_bytes += size;
+                }
+                Err(error) => result.warnings.push(format!(
+                    "failed to delete object {}: {error}",
+                    object_id.as_str()
+                )),
+            }
+        }
+
+        Ok(result)
+    }
+
     fn create_snapshot_id(&self) -> BackupCoreResult<CreatedSnapshot> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
             BackupError::InvalidRepository("system time is before unix epoch".into())
@@ -997,6 +1072,17 @@ impl RepositoryWriter {
             "failed to allocate unique snapshot id".into(),
         ))
     }
+}
+
+fn snapshot_object_ids(snapshot: &SnapshotFile) -> BackupCoreResult<HashSet<ObjectId>> {
+    let mut object_ids = HashSet::new();
+    for entry in &snapshot.entries {
+        if let Some(object_id) = &entry.object_id {
+            object_id.encryption_algorithm()?;
+            object_ids.insert(object_id.clone());
+        }
+    }
+    Ok(object_ids)
 }
 
 #[derive(Debug)]

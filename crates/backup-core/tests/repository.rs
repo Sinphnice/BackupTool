@@ -507,6 +507,184 @@ fn missing_snapshot_returns_error() {
 }
 
 #[test]
+fn delete_snapshot_removes_exclusive_objects() {
+    let root = TestDir::new("repo_delete_snapshot_exclusive");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "exclusive content").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    let object_path = repository_path.join("objects").join(object_id.as_str());
+    let object_size = fs::metadata(&object_path).unwrap().len();
+
+    let result = repository.writer().delete_snapshot(&snapshot.id).unwrap();
+
+    assert_eq!(result.snapshot_id, snapshot.id);
+    assert_eq!(result.deleted_object_count, 1);
+    assert_eq!(result.reclaimed_bytes, object_size);
+    assert!(result.warnings.is_empty());
+    assert!(!object_path.exists());
+    assert!(repository.reader().list_snapshots().unwrap().is_empty());
+}
+
+#[test]
+fn delete_snapshot_keeps_objects_referenced_by_another_snapshot() {
+    let root = TestDir::new("repo_delete_snapshot_shared");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "shared content").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let first = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let second = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &first.id);
+
+    let result = repository.writer().delete_snapshot(&first.id).unwrap();
+
+    assert_eq!(result.deleted_object_count, 0);
+    assert!(repository_path
+        .join("objects")
+        .join(object_id.as_str())
+        .exists());
+    repository.reader().restore(&second.id, &restore).unwrap();
+    assert_eq!(
+        fs::read_to_string(restore.join("a.txt")).unwrap(),
+        "shared content"
+    );
+}
+
+#[test]
+fn delete_snapshot_treats_plain_and_encrypted_objects_as_distinct_references() {
+    let root = TestDir::new("repo_delete_snapshot_variants");
+    let repository_path = root.path.join("repository");
+    let plain_source = root.path.join("plain");
+    let encrypted_source = root.path.join("encrypted");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&plain_source).unwrap();
+    fs::create_dir_all(&encrypted_source).unwrap();
+    fs::write(plain_source.join("plain.txt"), "same content").unwrap();
+    fs::write(encrypted_source.join("encrypted.txt"), "same content").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let plain = repository
+        .writer()
+        .backup(&plain_source, &BackupFilter::default())
+        .unwrap();
+    let encrypted = repository
+        .writer()
+        .backup_with_options(
+            &encrypted_source,
+            &BackupFilter::default(),
+            BackupOptions {
+                encryption_algorithm: EncryptionAlgorithm::Aes256Gcm,
+                encryption_password: Some("password".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let plain_object = first_file_object_id(&repository, &plain.id);
+    let encrypted_object = first_file_object_id(&repository, &encrypted.id);
+
+    let result = repository.writer().delete_snapshot(&encrypted.id).unwrap();
+
+    assert_eq!(result.deleted_object_count, 1);
+    assert!(repository_path
+        .join("objects")
+        .join(plain_object.as_str())
+        .exists());
+    assert!(!repository_path
+        .join("objects")
+        .join(encrypted_object.as_str())
+        .exists());
+    repository.reader().restore(&plain.id, &restore).unwrap();
+    assert_eq!(
+        fs::read_to_string(restore.join("plain.txt")).unwrap(),
+        "same content"
+    );
+}
+
+#[test]
+fn delete_snapshot_validates_other_snapshots_before_mutating_repository() {
+    let root = TestDir::new("repo_delete_snapshot_corrupt_other");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "first content").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let first = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &first.id);
+    fs::write(source.join("a.txt"), "second content").unwrap();
+    let second = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    fs::write(
+        repository_path
+            .join("snapshots")
+            .join(format!("{}.snapshot", second.id.as_str())),
+        "invalid snapshot",
+    )
+    .unwrap();
+
+    repository.writer().delete_snapshot(&first.id).unwrap_err();
+
+    assert!(repository_path
+        .join("snapshots")
+        .join(format!("{}.snapshot", first.id.as_str()))
+        .exists());
+    assert!(repository_path
+        .join("objects")
+        .join(object_id.as_str())
+        .exists());
+}
+
+#[test]
+fn delete_snapshot_reports_object_cleanup_failures_as_warnings() {
+    let root = TestDir::new("repo_delete_snapshot_cleanup_warning");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "cleanup warning").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    let object_path = repository_path.join("objects").join(object_id.as_str());
+    fs::remove_file(&object_path).unwrap();
+    fs::create_dir(&object_path).unwrap();
+
+    let result = repository.writer().delete_snapshot(&snapshot.id).unwrap();
+
+    assert_eq!(result.deleted_object_count, 0);
+    assert_eq!(result.warnings.len(), 1);
+    assert!(!repository_path
+        .join("snapshots")
+        .join(format!("{}.snapshot", snapshot.id.as_str()))
+        .exists());
+}
+
+#[test]
 fn best_effort_restore_preserves_file_modified_time_and_readonly_attribute() {
     let root = TestDir::new("repo_metadata_best_effort");
     let repository = Repository::init(root.path.join("repository")).unwrap();
