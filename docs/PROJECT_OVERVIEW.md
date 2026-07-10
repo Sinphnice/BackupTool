@@ -78,7 +78,7 @@ BackupTool/
 Rust 依赖由 Cargo workspace 管理：
 
 - 根目录 `Cargo.toml` 声明 workspace。
-- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包，依赖 `zstd` crate 实现 object 级 zstd 压缩，依赖 `sha2` crate 计算 SHA-256 object id。
+- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包，依赖 `zstd` crate 实现 object 级 zstd 压缩，依赖 `aes-gcm` 和 `argon2` 实现 object payload 加密，依赖 `sha2` crate 计算 SHA-256 object id。
 - `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog`。
 
 当前项目不再需要 CMake、MSBuild、C ABI 或 C++ 编译链。
@@ -462,14 +462,30 @@ just test 通过
 - 为临时界面需求破坏核心库模型。
 - 在核心能力不稳定前过早做复杂 GUI。
 
-## 13. Object 级压缩设计
+## 13. Object 级压缩与加密设计
 
 当前压缩能力作用于 repository 的 `objects/`，粒度是单个 object，而不是整个仓库目录或整个 tar 包。备份时可以选择压缩算法：
 
 - `none`：默认值，不压缩 payload。
 - `zstd`：使用 zstd 压缩 payload。
 
-`object-id` 始终由原始文件内容计算，不由 object header、压缩后的 payload 或后续可能加入的加密信息计算。当前实现使用 SHA-256，object id 是 64 字符小写十六进制 hash，不再附加文件大小后缀。这一点很重要：同一份原始文件内容即使采用不同压缩算法，逻辑 object id 也保持一致。
+当前加密能力同样作用于单个 object 的 payload，而不是整个仓库目录或 tar 包。备份时可以选择加密算法：
+
+- `none`：默认值，不加密 payload。
+- `aes-256-gcm`：使用 AES-256-GCM 加密 payload，并提供认证校验。
+
+用户通过密码启用加密。core 使用 Argon2id 和随机 salt 从密码派生 256-bit key，object header 中只保存算法、KDF、salt 和 nonce，不保存明文密码或派生 key。
+
+`content-hash` 始终由原始文件内容计算，不由 object header、压缩后的 payload、加密后的 payload、salt 或 nonce 计算。当前实现使用 SHA-256，得到 64 字符小写十六进制 hash。
+
+物理 `object-id` 在 content hash 后追加加密状态：
+
+```text
+<content-hash>-plain
+<content-hash>-encrypted
+```
+
+因此，相同内容的未加密 object 和加密 object 可以同时存在，不会因后续备份改变旧 snapshot 是否需要密码。相同原始内容且具有相同加密状态的文件仍映射到同一个 object，实现内容去重。压缩算法不进入 object id。
 
 object 物理路径统一为：
 
@@ -482,25 +498,48 @@ object 文件内部使用文本 header + 二进制 payload：
 ```text
 backup-tool object v1
 compression    none|zstd
+encryption     none|aes-256-gcm
+kdf            none|argon2id
+salt           <hex>
+nonce          <hex>
 original_size  <u64>
 payload_size   <u64>
 
 <payload bytes>
 ```
 
-压缩算法记录在 object header 中，不记录在 snapshot entry 中。压缩和解压只处理空行之后的 payload bytes，不处理 header。若同一 `object-id` 已存在但 header 中的 compression 与本次备份选择不同，会用同一份原始数据按本次算法重新生成 object 并覆盖；由于 object id 对应的原始内容不变，旧 snapshot 仍可恢复出相同文件内容。
+压缩算法和加密算法都记录在 object header 中，不记录在 snapshot entry 中。压缩和加密只处理空行之后的 payload bytes，不处理 header。写入顺序是：
 
-恢复流程中用户不需要选择压缩算法：
+```text
+原始文件内容
+    -> compression none|zstd
+    -> encryption none|aes-256-gcm
+    -> object payload
+```
+
+读取顺序相反：
+
+```text
+object payload
+    -> decryption none|aes-256-gcm
+    -> decompression none|zstd
+    -> 原始文件内容
+```
+
+若同一 `object-id` 已存在但 compression 与本次备份选择不同，会根据本次参数重写该加密状态下的 object。明文与密文使用不同 object id，彼此不会覆盖。对于已存在的加密 object，写入时会使用本次密码验证其内容；密码不匹配时返回明确错误，不会覆盖旧 object。
+
+恢复流程中用户不需要选择压缩算法或加密算法，算法从 object header 读取；如果 object 已加密，则必须提供正确密码：
 
 ```text
 snapshot entry
     -> object_id
     -> ObjectStore 读取 objects/<object-id>
-    -> 解析 object header 中的 compression
+    -> 解析 object header 中的 encryption 和 compression
+    -> 如果是 aes-256-gcm 则用密码解密 payload
     -> 如果是 zstd 则解压 payload
     -> 写回原始文件内容
 ```
 
-tar 导出/导入会保留 `objects/` 下的自描述 object 文件，因此压缩 repository 可以作为 tar 文件迁移到其他系统后再恢复。
+tar 导出/导入会保留 `objects/` 下的自描述 object 文件，因此压缩或加密 repository 可以作为 tar 文件迁移到其他系统后再恢复；加密 object 迁移后仍需要同一密码才能恢复。
 
 后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、object store、archive、compression、encryption 等核心模型演进。压缩已经具备 object 级 zstd 第一版，后续可继续扩展压缩率统计、压缩等级配置和更多算法。

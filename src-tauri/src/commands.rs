@@ -3,8 +3,8 @@ use crate::dto::{
     RestorePathStrategyDto, RestoreResultDto, SnapshotInfoDto,
 };
 use backup_core::{
-    ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, FileKind, Repository,
-    RestoreOptions, SnapshotFile, SnapshotId,
+    ArchiveAlgorithm, BackupError, BackupOptions, CompressionAlgorithm, EncryptionAlgorithm,
+    FileKind, Repository, RestoreOptions, SnapshotFile, SnapshotId,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,8 +19,12 @@ pub(crate) fn backup(
     filter: Option<BackupFilterDto>,
     compression_algorithm: Option<String>,
     snapshot_title: Option<String>,
+    encryption_algorithm: Option<String>,
+    encryption_password: Option<String>,
 ) -> Result<BackupResultDto, String> {
     let compression_algorithm = compression_algorithm_from_input(compression_algorithm)?;
+    let encryption_algorithm = encryption_algorithm_from_input(encryption_algorithm)?;
+    validate_encryption_password(encryption_algorithm, encryption_password.as_deref())?;
     let sources = paths_from_input(sources, "source")?;
     for source in &sources {
         ensure_source_directory(source)?;
@@ -30,6 +34,8 @@ pub(crate) fn backup(
     let filter = filter.map(Into::into).unwrap_or_default();
     let options = BackupOptions {
         compression_algorithm,
+        encryption_algorithm,
+        encryption_password,
         snapshot_title,
     };
     let snapshot = repository
@@ -63,6 +69,7 @@ pub(crate) fn restore(
     destination: String,
     path_strategy: Option<RestorePathStrategyDto>,
     flatten_conflict_strategy: Option<FlattenConflictStrategyDto>,
+    decryption_password: Option<String>,
 ) -> Result<RestoreResultDto, String> {
     let snapshot_id = snapshot_id_from_input(snapshot_id)?;
     let repository = Repository::open(path_from_input(backup_path, "repository")?)
@@ -79,6 +86,7 @@ pub(crate) fn restore(
     if let Some(flatten_conflict_strategy) = flatten_conflict_strategy {
         options.flatten_conflict_strategy = flatten_conflict_strategy.into();
     }
+    options.decryption_password = normalize_optional_secret(decryption_password);
     repository
         .reader()
         .restore_with_options(
@@ -222,6 +230,29 @@ fn compression_algorithm_from_input(value: Option<String>) -> Result<Compression
         "zstd" => Ok(CompressionAlgorithm::Zstd),
         other => Err(format!("unsupported compression algorithm: {other}")),
     }
+}
+
+fn encryption_algorithm_from_input(value: Option<String>) -> Result<EncryptionAlgorithm, String> {
+    let value = value.unwrap_or_else(|| "none".to_string());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(EncryptionAlgorithm::None),
+        "aes-256-gcm" => Ok(EncryptionAlgorithm::Aes256Gcm),
+        other => Err(format!("unsupported encryption algorithm: {other}")),
+    }
+}
+
+fn validate_encryption_password(
+    algorithm: EncryptionAlgorithm,
+    password: Option<&str>,
+) -> Result<(), String> {
+    if algorithm == EncryptionAlgorithm::Aes256Gcm && password.unwrap_or_default().is_empty() {
+        return Err("encryption password must not be empty".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_optional_secret(value: Option<String>) -> Option<String> {
+    value.and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
 
 #[derive(Default)]

@@ -131,11 +131,12 @@ impl Default for FlattenConflictStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreOptions {
     pub strategy: RestoreStrategy,
     pub path_strategy: RestorePathStrategy,
     pub flatten_conflict_strategy: FlattenConflictStrategy,
+    pub decryption_password: Option<String>,
 }
 
 impl Default for RestoreOptions {
@@ -144,6 +145,7 @@ impl Default for RestoreOptions {
             strategy: RestoreStrategy::BestEffort,
             path_strategy: RestorePathStrategy::PreserveRelativePath,
             flatten_conflict_strategy: FlattenConflictStrategy::Rename,
+            decryption_password: None,
         }
     }
 }

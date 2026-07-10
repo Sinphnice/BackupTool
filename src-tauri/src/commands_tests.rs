@@ -20,6 +20,8 @@ fn backup_and_restore_round_trip_regular_files() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(backup_result.file_count, 3);
@@ -30,6 +32,7 @@ fn backup_and_restore_round_trip_regular_files() {
         repository_dir.to_string_lossy().into_owned(),
         backup_result.snapshot_id,
         restore_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -75,6 +78,8 @@ fn backup_applies_extension_filter() {
         }),
         None,
         None,
+        None,
+        None,
     )
     .unwrap();
 
@@ -83,6 +88,7 @@ fn backup_applies_extension_filter() {
         repository_dir.to_string_lossy().into_owned(),
         result.snapshot_id,
         restore_dir.to_string_lossy().into_owned(),
+        None,
         None,
         None,
     )
@@ -105,12 +111,16 @@ fn list_snapshots_returns_repository_snapshot_summaries() {
         None,
         None,
         Some("first title".to_string()),
+        None,
+        None,
     )
     .unwrap();
     fs::write(source.join("b.txt"), "beta").unwrap();
     let second = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
         None,
         None,
         None,
@@ -138,6 +148,8 @@ fn backup_returns_core_error_as_string() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .unwrap_err();
 
@@ -160,6 +172,8 @@ fn backup_rejects_non_empty_non_repository_destination() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .unwrap_err();
 
@@ -177,6 +191,7 @@ fn restore_requires_snapshot_id() {
         "unused".to_string(),
         None,
         None,
+        None,
     )
     .unwrap_err();
 
@@ -185,7 +200,16 @@ fn restore_requires_snapshot_id() {
 
 #[test]
 fn backup_requires_at_least_one_source() {
-    let error = backup(Vec::new(), "unused".to_string(), None, None, None).unwrap_err();
+    let error = backup(
+        Vec::new(),
+        "unused".to_string(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
 
     assert!(error.contains("at least one source path is required"));
 }
@@ -211,6 +235,8 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(backup_result.file_count, 2);
@@ -221,6 +247,7 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
         restore_dir.to_string_lossy().into_owned(),
         Some(RestorePathStrategyDto::Flatten),
         Some(FlattenConflictStrategyDto::Rename),
+        None,
     )
     .unwrap();
 
@@ -243,6 +270,8 @@ fn backup_command_accepts_zstd_compression_and_restore_decompresses() {
         None,
         Some("zstd".to_string()),
         None,
+        None,
+        None,
     )
     .unwrap();
     let object_path = fs::read_dir(repository_dir.join("objects"))
@@ -263,6 +292,7 @@ fn backup_command_accepts_zstd_compression_and_restore_decompresses() {
         restore_dir.to_string_lossy().into_owned(),
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -279,10 +309,125 @@ fn backup_command_rejects_unknown_compression_algorithm() {
         None,
         Some("brotli".to_string()),
         None,
+        None,
+        None,
     )
     .unwrap_err();
 
     assert!(error.contains("unsupported compression algorithm: brotli"));
+}
+
+#[test]
+fn backup_command_accepts_aes_encryption_and_restore_decrypts() {
+    let root = TestDir::new("tauri_aes_backup");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    let restore_dir = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "secret text").unwrap();
+
+    let backup_result = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+    let object_path = fs::read_dir(repository_dir.join("objects"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let object_bytes = fs::read(&object_path).unwrap();
+    assert!(object_header_text(&object_path).contains("encryption\taes-256-gcm"));
+    assert!(!String::from_utf8_lossy(&object_bytes).contains("secret text"));
+
+    restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        Some("password".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(restore_dir.join("a.txt")).unwrap(),
+        "secret text"
+    );
+}
+
+#[test]
+fn backup_command_rejects_invalid_encryption_options() {
+    let missing_password = backup(
+        vec!["unused".to_string()],
+        "unused".to_string(),
+        None,
+        None,
+        None,
+        Some("aes-256-gcm".to_string()),
+        None,
+    )
+    .unwrap_err();
+    assert!(missing_password.contains("encryption password must not be empty"));
+
+    let unknown_algorithm = backup(
+        vec!["unused".to_string()],
+        "unused".to_string(),
+        None,
+        None,
+        None,
+        Some("rot13".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap_err();
+    assert!(unknown_algorithm.contains("unsupported encryption algorithm: rot13"));
+}
+
+#[test]
+fn restore_command_rejects_missing_or_wrong_decryption_password() {
+    let root = TestDir::new("tauri_aes_restore_password");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "secret text").unwrap();
+
+    let backup_result = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+
+    let missing_password = restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id.clone(),
+        root.path.join("missing").to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(missing_password.contains("encryption password must not be empty"));
+
+    let wrong_password = restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        root.path.join("wrong").to_string_lossy().into_owned(),
+        None,
+        None,
+        Some("wrong".to_string()),
+    )
+    .unwrap_err();
+    assert!(wrong_password.contains("failed to decrypt object payload"));
 }
 
 #[test]
@@ -299,6 +444,8 @@ fn export_and_import_repository_commands_round_trip_tar() {
     let backup_result = backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
         None,
         None,
         None,
@@ -331,6 +478,7 @@ fn export_and_import_repository_commands_round_trip_tar() {
         restored.to_string_lossy().into_owned(),
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(fs::read_to_string(restored.join("a.txt")).unwrap(), "alpha");
@@ -360,6 +508,8 @@ fn import_repository_command_rejects_non_empty_destination() {
     backup(
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
         None,
         None,
         None,

@@ -48,6 +48,7 @@ const chooseImportFile = required<HTMLButtonElement>("#choose-import-file");
 const addSource = required<HTMLButtonElement>("#add-source");
 const sourceList = required<HTMLDivElement>("#source-list");
 const openRepository = required<HTMLButtonElement>("#open-repository");
+const refreshRepository = required<HTMLButtonElement>("#refresh-repository");
 const currentRepository = required<HTMLSpanElement>("#current-repository");
 const snapshotList = required<HTMLSelectElement>("#snapshot-list");
 const restorePathStrategy = required<HTMLSelectElement>("#restore-path-strategy");
@@ -55,6 +56,8 @@ const flattenConflictRow = required<HTMLElement>("#flatten-conflict-row");
 const flattenConflictStrategy = required<HTMLSelectElement>("#flatten-conflict-strategy");
 const archiveAlgorithm = required<HTMLSelectElement>("#archive-algorithm");
 const compressionAlgorithm = required<HTMLSelectElement>("#compression-algorithm");
+const encryptionAlgorithm = required<HTMLSelectElement>("#encryption-algorithm");
+const encryptionPasswordRow = required<HTMLElement>("#encryption-password-row");
 const browseButtons = document.querySelectorAll<HTMLButtonElement>(".browse-button");
 const sourcePaths: string[] = [];
 let currentRepositoryPath = "";
@@ -69,6 +72,10 @@ function required<T extends Element>(selector: string): T {
 
 function inputValue(selector: string): string {
   return required<HTMLInputElement>(selector).value.trim();
+}
+
+function rawInputValue(selector: string): string {
+  return required<HTMLInputElement>(selector).value;
 }
 
 function optionalNumber(selector: string): number | undefined {
@@ -236,6 +243,10 @@ function updateRestoreStrategyControls(): void {
   flattenConflictRow.hidden = restorePathStrategy.value !== "flatten";
 }
 
+function updateEncryptionControls(): void {
+  encryptionPasswordRow.hidden = encryptionAlgorithm.value !== "aes-256-gcm";
+}
+
 browseButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const targetId = button.dataset.target;
@@ -282,6 +293,19 @@ openRepository.addEventListener("click", async () => {
   }
 });
 
+refreshRepository.addEventListener("click", async () => {
+  if (!currentRepositoryPath) {
+    result.textContent = "Open a repository before refreshing.";
+    return;
+  }
+
+  try {
+    await loadRepositorySnapshots(currentRepositoryPath);
+  } catch (error) {
+    result.textContent = String(error);
+  }
+});
+
 chooseExportFile.addEventListener("click", async () => {
   try {
     const selected = await chooseExportArchiveFile();
@@ -305,6 +329,7 @@ chooseImportFile.addEventListener("click", async () => {
 });
 
 restorePathStrategy.addEventListener("change", updateRestoreStrategyControls);
+encryptionAlgorithm.addEventListener("change", updateEncryptionControls);
 
 startBackup.addEventListener("click", async () => {
   result.textContent = "Running backup...";
@@ -320,6 +345,8 @@ startBackup.addEventListener("click", async () => {
       filter: collectFilter(),
       compressionAlgorithm: compressionAlgorithm.value,
       snapshotTitle: inputValue("#snapshot-title"),
+      encryptionAlgorithm: encryptionAlgorithm.value,
+      encryptionPassword: rawInputValue("#encryption-password"),
     });
     result.textContent = formatOperation("Backup", value);
   } catch (error) {
@@ -346,6 +373,7 @@ startRestore.addEventListener("click", async () => {
       destination: inputValue("#restore-destination"),
       pathStrategy: restorePathStrategy.value,
       flattenConflictStrategy: flattenConflictStrategy.value,
+      decryptionPassword: rawInputValue("#decryption-password"),
     });
     result.textContent = formatOperation("Restore", value);
   } catch (error) {
@@ -385,3 +413,4 @@ importRepository.addEventListener("click", async () => {
 
 renderSourceList();
 updateRestoreStrategyControls();
+updateEncryptionControls();

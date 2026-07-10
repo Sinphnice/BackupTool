@@ -4,6 +4,10 @@ use crate::filesystem::{
     RestoreReport,
 };
 use crate::{BackupCoreResult, BackupError, BackupFilter};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use argon2::Argon2;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -38,6 +42,30 @@ pub struct ObjectId(String);
 impl ObjectId {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn encryption_algorithm(&self) -> BackupCoreResult<EncryptionAlgorithm> {
+        let (content_hash, algorithm) = if let Some(hash) = self.0.strip_suffix("-plain") {
+            (hash, EncryptionAlgorithm::None)
+        } else if let Some(hash) = self.0.strip_suffix("-encrypted") {
+            (hash, EncryptionAlgorithm::Aes256Gcm)
+        } else {
+            return Err(BackupError::InvalidRepository(format!(
+                "invalid object id: {}",
+                self.0
+            )));
+        };
+        if content_hash.len() != 64
+            || !content_hash
+                .bytes()
+                .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        {
+            return Err(BackupError::InvalidRepository(format!(
+                "invalid object content hash: {}",
+                self.0
+            )));
+        }
+        Ok(algorithm)
     }
 }
 
@@ -117,9 +145,17 @@ pub enum CompressionAlgorithm {
     Zstd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionAlgorithm {
+    None,
+    Aes256Gcm,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupOptions {
     pub compression_algorithm: CompressionAlgorithm,
+    pub encryption_algorithm: EncryptionAlgorithm,
+    pub encryption_password: Option<String>,
     pub snapshot_title: Option<String>,
 }
 
@@ -127,6 +163,8 @@ impl Default for BackupOptions {
     fn default() -> Self {
         Self {
             compression_algorithm: CompressionAlgorithm::None,
+            encryption_algorithm: EncryptionAlgorithm::None,
+            encryption_password: None,
             snapshot_title: None,
         }
     }
@@ -147,6 +185,32 @@ impl CompressionAlgorithm {
             _ => Err(BackupError::InvalidRepository(format!(
                 "invalid compression algorithm: {value}"
             ))),
+        }
+    }
+}
+
+impl EncryptionAlgorithm {
+    fn as_object_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+
+    fn from_object_value(value: &str) -> BackupCoreResult<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "aes-256-gcm" => Ok(Self::Aes256Gcm),
+            _ => Err(BackupError::InvalidRepository(format!(
+                "invalid encryption algorithm: {value}"
+            ))),
+        }
+    }
+
+    fn object_id_suffix(self) -> &'static str {
+        match self {
+            Self::None => "plain",
+            Self::Aes256Gcm => "encrypted",
         }
     }
 }
@@ -412,12 +476,18 @@ pub struct ObjectStore {
 pub struct StoredObject {
     pub object_id: ObjectId,
     pub compression_algorithm: CompressionAlgorithm,
+    pub encryption_algorithm: EncryptionAlgorithm,
 }
 
 impl ObjectStore {
     pub fn write_object(&self, bytes: &[u8]) -> BackupCoreResult<ObjectId> {
-        self.write_object_with_compression(bytes, CompressionAlgorithm::None)
-            .map(|object| object.object_id)
+        self.write_object_with_options(
+            bytes,
+            CompressionAlgorithm::None,
+            EncryptionAlgorithm::None,
+            None,
+        )
+        .map(|object| object.object_id)
     }
 
     pub fn write_object_with_compression(
@@ -425,26 +495,82 @@ impl ObjectStore {
         bytes: &[u8],
         compression_algorithm: CompressionAlgorithm,
     ) -> BackupCoreResult<StoredObject> {
+        self.write_object_with_options(
+            bytes,
+            compression_algorithm,
+            EncryptionAlgorithm::None,
+            None,
+        )
+    }
+
+    pub fn write_object_with_options(
+        &self,
+        bytes: &[u8],
+        compression_algorithm: CompressionAlgorithm,
+        encryption_algorithm: EncryptionAlgorithm,
+        encryption_password: Option<&str>,
+    ) -> BackupCoreResult<StoredObject> {
+        validate_encryption_password(encryption_algorithm, encryption_password)?;
         fs::create_dir_all(&self.root)?;
-        let object_id = ContentHasher::hash_bytes(bytes);
+        let object_id = ContentHasher::hash_bytes(bytes, encryption_algorithm);
         let path = self.path_for(&object_id);
         let should_write = if path.exists() {
-            read_object_header(&fs::read(&path)?)?.compression_algorithm != compression_algorithm
+            let existing = read_object_header(&fs::read(&path)?)?;
+            if existing.encryption_algorithm != encryption_algorithm {
+                return Err(BackupError::InvalidRepository(format!(
+                    "object id encryption state does not match its header: {}",
+                    object_id.as_str()
+                )));
+            }
+            if existing.encryption_algorithm == EncryptionAlgorithm::Aes256Gcm
+                && encryption_algorithm == EncryptionAlgorithm::Aes256Gcm
+            {
+                let decoded = self.read_object_with_password(&object_id, encryption_password)?;
+                if decoded != bytes {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "existing encrypted object content mismatch: {}",
+                        object_id.as_str()
+                    )));
+                }
+            }
+            existing.compression_algorithm != compression_algorithm
         } else {
             true
         };
         if should_write {
             let mut file = fs::File::create(path)?;
-            file.write_all(&encode_object(bytes, compression_algorithm)?)?;
+            file.write_all(&encode_object(
+                bytes,
+                compression_algorithm,
+                encryption_algorithm,
+                encryption_password,
+            )?)?;
         }
         Ok(StoredObject {
             object_id,
             compression_algorithm,
+            encryption_algorithm,
         })
     }
 
     pub fn read_object(&self, object_id: &ObjectId) -> BackupCoreResult<Vec<u8>> {
-        decode_object(&fs::read(self.path_for(object_id))?)
+        self.read_object_with_password(object_id, None)
+    }
+
+    pub fn read_object_with_password(
+        &self,
+        object_id: &ObjectId,
+        decryption_password: Option<&str>,
+    ) -> BackupCoreResult<Vec<u8>> {
+        let bytes = fs::read(self.path_for(object_id))?;
+        let header = read_object_header(&bytes)?;
+        if object_id.encryption_algorithm()? != header.encryption_algorithm {
+            return Err(BackupError::InvalidRepository(format!(
+                "object id encryption state does not match its header: {}",
+                object_id.as_str()
+            )));
+        }
+        decode_object(&bytes, decryption_password)
     }
 
     fn path_for(&self, object_id: &ObjectId) -> PathBuf {
@@ -457,6 +583,10 @@ const OBJECT_HEADER_MAGIC: &str = "backup-tool object v1";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObjectHeader {
     compression_algorithm: CompressionAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    kdf: String,
+    salt: Option<Vec<u8>>,
+    nonce: Option<Vec<u8>>,
     original_size: u64,
     payload_size: u64,
     header_len: usize,
@@ -465,24 +595,43 @@ struct ObjectHeader {
 fn encode_object(
     bytes: &[u8],
     compression_algorithm: CompressionAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    encryption_password: Option<&str>,
 ) -> BackupCoreResult<Vec<u8>> {
-    let payload = match compression_algorithm {
+    validate_encryption_password(encryption_algorithm, encryption_password)?;
+    let compressed = match compression_algorithm {
         CompressionAlgorithm::None => Ok(bytes.to_vec()),
         CompressionAlgorithm::Zstd => zstd::stream::encode_all(bytes, 3).map_err(BackupError::Io),
     }?;
+    let encrypted = encrypt_payload(&compressed, encryption_algorithm, encryption_password)?;
     let header = format!(
-        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
+        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\nencryption\t{}\nkdf\t{}\nsalt\t{}\nnonce\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
         compression_algorithm.as_object_value(),
+        encryption_algorithm.as_object_value(),
+        match encryption_algorithm {
+            EncryptionAlgorithm::None => "none",
+            EncryptionAlgorithm::Aes256Gcm => "argon2id",
+        },
+        encrypted
+            .salt
+            .as_ref()
+            .map(hex::encode)
+            .unwrap_or_default(),
+        encrypted
+            .nonce
+            .as_ref()
+            .map(hex::encode)
+            .unwrap_or_default(),
         bytes.len(),
-        payload.len()
+        encrypted.payload.len()
     );
-    let mut output = Vec::with_capacity(header.len() + payload.len());
+    let mut output = Vec::with_capacity(header.len() + encrypted.payload.len());
     output.extend_from_slice(header.as_bytes());
-    output.extend_from_slice(&payload);
+    output.extend_from_slice(&encrypted.payload);
     Ok(output)
 }
 
-fn decode_object(bytes: &[u8]) -> BackupCoreResult<Vec<u8>> {
+fn decode_object(bytes: &[u8], decryption_password: Option<&str>) -> BackupCoreResult<Vec<u8>> {
     let header = read_object_header(bytes)?;
     let payload = &bytes[header.header_len..];
     if payload.len() != usize::try_from(header.payload_size).unwrap_or(usize::MAX) {
@@ -493,9 +642,12 @@ fn decode_object(bytes: &[u8]) -> BackupCoreResult<Vec<u8>> {
         )));
     }
 
+    let decrypted = decrypt_payload(payload, &header, decryption_password)?;
     let decoded = match header.compression_algorithm {
-        CompressionAlgorithm::None => Ok(payload.to_vec()),
-        CompressionAlgorithm::Zstd => zstd::stream::decode_all(payload).map_err(BackupError::Io),
+        CompressionAlgorithm::None => Ok(decrypted),
+        CompressionAlgorithm::Zstd => {
+            zstd::stream::decode_all(decrypted.as_slice()).map_err(BackupError::Io)
+        }
     }?;
     if decoded.len() != usize::try_from(header.original_size).unwrap_or(usize::MAX) {
         return Err(BackupError::InvalidRepository(format!(
@@ -505,6 +657,111 @@ fn decode_object(bytes: &[u8]) -> BackupCoreResult<Vec<u8>> {
         )));
     }
     Ok(decoded)
+}
+
+struct EncryptedPayload {
+    payload: Vec<u8>,
+    salt: Option<Vec<u8>>,
+    nonce: Option<Vec<u8>>,
+}
+
+fn encrypt_payload(
+    payload: &[u8],
+    encryption_algorithm: EncryptionAlgorithm,
+    encryption_password: Option<&str>,
+) -> BackupCoreResult<EncryptedPayload> {
+    match encryption_algorithm {
+        EncryptionAlgorithm::None => Ok(EncryptedPayload {
+            payload: payload.to_vec(),
+            salt: None,
+            nonce: None,
+        }),
+        EncryptionAlgorithm::Aes256Gcm => {
+            let password = required_password(encryption_password)?;
+            let mut salt = vec![0_u8; 16];
+            let mut nonce = vec![0_u8; 12];
+            rand::thread_rng().fill_bytes(&mut salt);
+            rand::thread_rng().fill_bytes(&mut nonce);
+            let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, &salt)?)
+                .map_err(|_| BackupError::InvalidRepository("invalid AES key length".into()))?;
+            let encrypted = cipher
+                .encrypt(Nonce::from_slice(&nonce), payload)
+                .map_err(|_| BackupError::InvalidRepository("object encryption failed".into()))?;
+            Ok(EncryptedPayload {
+                payload: encrypted,
+                salt: Some(salt),
+                nonce: Some(nonce),
+            })
+        }
+    }
+}
+
+fn decrypt_payload(
+    payload: &[u8],
+    header: &ObjectHeader,
+    decryption_password: Option<&str>,
+) -> BackupCoreResult<Vec<u8>> {
+    match header.encryption_algorithm {
+        EncryptionAlgorithm::None => Ok(payload.to_vec()),
+        EncryptionAlgorithm::Aes256Gcm => {
+            if header.kdf != "argon2id" {
+                return Err(BackupError::InvalidRepository(format!(
+                    "unsupported object kdf: {}",
+                    header.kdf
+                )));
+            }
+            let password = required_password(decryption_password)?;
+            let salt = header.salt.as_deref().ok_or_else(|| {
+                BackupError::InvalidRepository("encrypted object salt is missing".into())
+            })?;
+            let nonce = header.nonce.as_deref().ok_or_else(|| {
+                BackupError::InvalidRepository("encrypted object nonce is missing".into())
+            })?;
+            if nonce.len() != 12 {
+                return Err(BackupError::InvalidRepository(format!(
+                    "invalid AES-GCM nonce length: {}",
+                    nonce.len()
+                )));
+            }
+            let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, salt)?)
+                .map_err(|_| BackupError::InvalidRepository("invalid AES key length".into()))?;
+            cipher
+                .decrypt(Nonce::from_slice(nonce), payload)
+                .map_err(|_| {
+                    BackupError::InvalidRepository(
+                        "failed to decrypt object payload; password may be incorrect".into(),
+                    )
+                })
+        }
+    }
+}
+
+fn validate_encryption_password(
+    encryption_algorithm: EncryptionAlgorithm,
+    encryption_password: Option<&str>,
+) -> BackupCoreResult<()> {
+    if encryption_algorithm == EncryptionAlgorithm::Aes256Gcm {
+        required_password(encryption_password)?;
+    }
+    Ok(())
+}
+
+fn required_password(value: Option<&str>) -> BackupCoreResult<&str> {
+    let password = value.unwrap_or_default();
+    if password.is_empty() {
+        return Err(BackupError::InvalidRepository(
+            "encryption password must not be empty".into(),
+        ));
+    }
+    Ok(password)
+}
+
+fn derive_encryption_key(password: &str, salt: &[u8]) -> BackupCoreResult<[u8; 32]> {
+    let mut key = [0_u8; 32];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|_| BackupError::InvalidRepository("failed to derive encryption key".into()))?;
+    Ok(key)
 }
 
 fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
@@ -525,6 +782,10 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
     }
 
     let mut compression_algorithm = None;
+    let mut encryption_algorithm = None;
+    let mut kdf = None;
+    let mut salt = None;
+    let mut nonce = None;
     let mut original_size = None;
     let mut payload_size = None;
     for line in lines {
@@ -536,6 +797,18 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
         match key {
             "compression" => {
                 compression_algorithm = Some(CompressionAlgorithm::from_object_value(value)?);
+            }
+            "encryption" => {
+                encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?);
+            }
+            "kdf" => {
+                kdf = Some(value.to_string());
+            }
+            "salt" => {
+                salt = parse_optional_hex(value, "salt")?;
+            }
+            "nonce" => {
+                nonce = parse_optional_hex(value, "nonce")?;
             }
             "original_size" => {
                 original_size = Some(value.parse::<u64>().map_err(|_| {
@@ -559,6 +832,10 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
         compression_algorithm: compression_algorithm.ok_or_else(|| {
             BackupError::InvalidRepository("object compression is missing".into())
         })?,
+        encryption_algorithm: encryption_algorithm.unwrap_or(EncryptionAlgorithm::None),
+        kdf: kdf.unwrap_or_else(|| "none".to_string()),
+        salt,
+        nonce,
         original_size: original_size.ok_or_else(|| {
             BackupError::InvalidRepository("object original size is missing".into())
         })?,
@@ -569,6 +846,15 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
     })
 }
 
+fn parse_optional_hex(value: &str, name: &str) -> BackupCoreResult<Option<Vec<u8>>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    hex::decode(value)
+        .map(Some)
+        .map_err(|_| BackupError::InvalidRepository(format!("invalid object {name} hex value")))
+}
+
 fn find_header_separator(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|window| window == b"\n\n")
 }
@@ -576,9 +862,12 @@ fn find_header_separator(bytes: &[u8]) -> Option<usize> {
 pub struct ContentHasher;
 
 impl ContentHasher {
-    pub fn hash_bytes(bytes: &[u8]) -> ObjectId {
+    pub fn hash_bytes(bytes: &[u8], encryption_algorithm: EncryptionAlgorithm) -> ObjectId {
         let hash = Sha256::digest(bytes);
-        ObjectId(format!("{hash:x}"))
+        ObjectId(format!(
+            "{hash:x}-{}",
+            encryption_algorithm.object_id_suffix()
+        ))
     }
 }
 
@@ -662,6 +951,8 @@ impl RepositoryWriter {
                 &provider,
                 &object_store,
                 options.compression_algorithm,
+                options.encryption_algorithm,
+                options.encryption_password.as_deref(),
                 &mut snapshot_file,
             )?;
         }
@@ -898,7 +1189,13 @@ impl RepositoryReader {
                         Err(BackupError::SkipFile(_)) => continue,
                         Err(error) => return Err(error),
                     };
-                    writer.write_file(&target, &object_store.read_object(object_id)?)?;
+                    writer.write_file(
+                        &target,
+                        &object_store.read_object_with_password(
+                            object_id,
+                            options.decryption_password.as_deref(),
+                        )?,
+                    )?;
                     report.warnings.extend(writer.restore_metadata(
                         &target,
                         &entry.to_file_entry_at(&target),
@@ -962,6 +1259,8 @@ fn scan_into_snapshot_file(
     provider: &impl FileSystemProvider,
     object_store: &ObjectStore,
     compression_algorithm: CompressionAlgorithm,
+    encryption_algorithm: EncryptionAlgorithm,
+    encryption_password: Option<&str>,
     snapshot_file: &mut SnapshotFile,
 ) -> BackupCoreResult<()> {
     for entry in fs::read_dir(current)? {
@@ -983,6 +1282,8 @@ fn scan_into_snapshot_file(
                 provider,
                 object_store,
                 compression_algorithm,
+                encryption_algorithm,
+                encryption_password,
                 snapshot_file,
             )?;
             continue;
@@ -1005,8 +1306,12 @@ fn scan_into_snapshot_file(
         }
 
         let bytes = provider.read_file(&path)?;
-        let stored_object =
-            object_store.write_object_with_compression(&bytes, compression_algorithm)?;
+        let stored_object = object_store.write_object_with_options(
+            &bytes,
+            compression_algorithm,
+            encryption_algorithm,
+            encryption_password,
+        )?;
 
         snapshot_file.push_entry(source_index, file_entry, Some(stored_object.object_id));
     }
