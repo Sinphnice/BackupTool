@@ -18,6 +18,7 @@
 
 html,
 body,
+#root,
 #app-shell {
   width: 100%;
   height: 100%;
@@ -30,7 +31,7 @@ body {
   background: #f5f6f7;
 }
 
-body.is-resizing {
+#app-shell.is-resizing {
   cursor: col-resize;
   user-select: none;
 }
@@ -69,7 +70,7 @@ button {
 
 #sidebar-resizer:hover,
 #sidebar-resizer:focus-visible,
-body.is-resizing #sidebar-resizer {
+#app-shell.is-resizing #sidebar-resizer {
   outline: 0;
   background: #27927a;
 }
@@ -268,7 +269,7 @@ body.is-resizing #sidebar-resizer {
   white-space: nowrap;
 }
 
-#workspace-repository-path,
+.workspace-path,
 .page-subtitle {
   overflow: hidden;
   margin: 0;
@@ -290,7 +291,11 @@ body.is-resizing #sidebar-resizer {
 .secondary-button,
 .compact-button,
 .danger-button {
+  display: inline-flex;
   min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 7px 13px;
   border: 1px solid #aeb6ba;
   border-radius: 5px;
@@ -325,6 +330,26 @@ body.is-resizing #sidebar-resizer {
   min-height: 30px;
   padding: 4px 9px;
   font-size: 12px;
+}
+
+.icon-button {
+  width: 32px;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.icon-button-text {
+  display: inline-flex;
+}
+
+.button-icon {
+  display: inline-grid;
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  place-items: center;
+  font-size: 14px;
+  line-height: 1;
 }
 
 .danger-button {

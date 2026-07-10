@@ -7,7 +7,7 @@
 BackupTool 是一个基于 Tauri 2 的桌面备份工具。当前版本已经从早期 C++ Core + Rust FFI 方案迁移为纯 Rust 后端核心，整体调用链为：
 
 ```text
-TypeScript GUI
+React TypeScript GUI
     -> Tauri command
         -> Rust backup-core
 ```
@@ -35,7 +35,7 @@ TypeScript GUI
 
 ```text
 BackupTool/
-├── src/                    # 前端界面、状态、API 和视图：TypeScript / HTML / CSS
+├── src/                    # 前端界面、状态、API 和视图：React / TypeScript / HTML / CSS
 ├── src-tauri/              # Tauri 桌面应用层：command、DTO、权限、窗口配置
 ├── crates/
 │   └── backup-core/        # 纯 Rust 备份核心库
@@ -52,7 +52,7 @@ BackupTool/
 
 | 层次 | 路径 | 技术 | 职责 |
 | --- | --- | --- | --- |
-| GUI 层 | `src/` | TypeScript, HTML, CSS, Vite | 仓库侧栏、工作区路由、参数输入、snapshot 选择、结果展示 |
+| GUI 层 | `src/` | React, TypeScript, HTML, CSS, Vite | 仓库侧栏、工作区路由、参数输入、snapshot 选择、结果展示 |
 | 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | 暴露 Tauri command、DTO 转换、路径校验、错误转换 |
 | 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、object store、恢复策略、tar 归档 |
 | 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和构建 |
@@ -74,7 +74,10 @@ BackupTool/
 - `@tauri-apps/api`：前端调用 Tauri command。
 - `@tauri-apps/plugin-dialog`：目录和文件选择对话框。
 - `@tauri-apps/plugin-store`：保存仓库列表、侧栏布局和非敏感工作区草稿。
+- `react` / `react-dom`：GUI 组件和渲染层。
 - `@tauri-apps/cli`：Tauri 开发运行和打包。
+- `@types/react` / `@types/react-dom`：React TypeScript 类型。
+- `@vitejs/plugin-react`：React/Vite 开发构建支持。
 - `typescript`：类型检查。
 - `vite`：前端开发服务和静态资源构建。
 - `vitest`：前端状态模型测试。
@@ -105,7 +108,7 @@ backup-core 核心层
 实际调用路径：
 
 ```text
-src/main.ts -> src/api.ts
+src/main.tsx -> src/App.tsx -> src/api.ts
     -> invoke("create_repository" / "open_repository" / "backup" / "restore"
               / "list_snapshots" / "delete_snapshot" / "export_repository" / "import_repository")
         -> src-tauri/src/commands.rs
@@ -296,7 +299,7 @@ Tauri DTO 位于 `src-tauri/src/dto.rs`：
 - `Export Repository` 页面：固定当前仓库，导出为 tar。
 - `Restore Snapshot` 页面：固定当前仓库和 snapshot，只选择恢复目录、路径策略、冲突策略和密码。
 
-GUI 通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；密码只保留在当前页面内存中，不写入 Store 或 repository。
+GUI 通过 React 组件组织界面，通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；密码只保留在当前页面内存中，不写入 Store 或 repository。
 
 ## 9. 环境配置
 

@@ -14,16 +14,16 @@ BackupTool 是《软件开发综合实验》课程项目，目标是设计并实
 当前项目采用纯 Rust 后端：
 
 ```text
-TypeScript GUI -> Tauri command -> Rust backup-core
+React TypeScript GUI -> Tauri command -> Rust backup-core
 ```
 
 | 部分 | 目录 | 技术 | 作用 |
 | --- | --- | --- | --- |
-| 前端界面 | `src/` | TypeScript, Vite | 构建 Web UI，并通过 Tauri API 调用后端命令 |
+| 前端界面 | `src/` | React, TypeScript, Vite | 构建 Web UI，并通过 Tauri API 调用后端命令 |
 | 桌面壳与命令层 | `src-tauri/` | Rust, Tauri 2 | 提供桌面窗口和 Tauri command，只做 DTO 转换 |
 | 备份核心库 | `crates/backup-core/` | Rust | 实现备份、恢复、筛选和后续仓库式备份核心逻辑 |
 
-当前功能为 legacy mirror backup：将普通目录中的普通文件按相对路径复制到备份目录，并可从备份目录恢复到指定目录。该能力作为基础验收和后续仓库式备份演进的兼容基线。
+当前功能已经迁移为仓库式备份：备份数据保存在 repository 中，每次备份生成一个 snapshot，文件内容进入 object store；恢复时选择 snapshot，并按路径策略还原到目标目录。
 
 ## 基础功能
 
@@ -35,15 +35,18 @@ TypeScript GUI -> Tauri command -> Rust backup-core
 当前已支持：
 
 - 普通目录和普通文件的备份与恢复。
-- 目标目录不存在时自动创建。
+- 多源目录备份。
+- repository 新建、打开、导入、导出。
+- snapshot 添加、列表读取、恢复和删除。
 - 路径、扩展名、文件名、修改时间、文件大小筛选。
+- object 级 zstd 压缩和 AES-256-GCM 加密。
 - Tauri GUI 触发备份、恢复并显示结果。
 
 ## 可选扩展方向
 
 项目可根据开发进度选择实现以下扩展功能：
 
-- 仓库式备份：使用 repository、snapshot、manifest、object store 管理多次备份。
+- 仓库式备份：使用 repository、snapshot、object store 管理多次备份。
 - 文件元数据支持：保存并恢复文件时间、权限、属主等信息。
 - 文件类型支持：支持特定文件系统的特殊文件，例如链接、管道、设备文件。
 - 打包与解包：将备份仓库或快照组织为单个备份包。

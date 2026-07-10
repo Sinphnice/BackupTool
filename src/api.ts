@@ -131,9 +131,14 @@ export async function chooseExportPath(defaultPath = "repository.tar"): Promise<
   );
 }
 
-export function confirmSnapshotDeletion(title: string): Promise<boolean> {
-  return confirm(`Delete snapshot “${title}”? Unreferenced objects will also be removed.`, {
-    title: "Delete snapshot",
-    kind: "warning",
-  });
+export async function confirmSnapshotDeletion(title: string): Promise<boolean> {
+  const message = `Delete snapshot "${title}"? Unreferenced objects will also be removed.`;
+  try {
+    return await confirm(message, {
+      title: "Delete snapshot",
+      kind: "warning",
+    });
+  } catch {
+    return window.confirm(message);
+  }
 }
