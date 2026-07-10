@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.example.backuptool",
   "build": {
-    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
   "app": {

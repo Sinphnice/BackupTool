@@ -1,4 +1,17 @@
-import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import {
+  Archive,
+  Plus,
+  FolderOpen,
+  Download,
+  Pin,
+  PinOff,
+  X,
+  Upload,
+  RefreshCw,
+  FolderClosed,
+  type LucideIcon,
+} from "lucide-react";
 import {
   chooseDirectory,
   chooseExportPath,
@@ -28,6 +41,7 @@ import type {
 
 type Notice = { tone: "info" | "success" | "error" | "warning"; message: string };
 type GlobalPage = "new" | "import" | null;
+type WorkspaceModal = "add" | "export" | "restore" | null;
 type SnapshotMap = Record<string, SnapshotInfo[] | undefined>;
 
 const MIN_SIDEBAR_WIDTH = 220;
@@ -59,14 +73,6 @@ function normalizePathKey(path: string): string {
   return path.replace(/\\/g, "/").toLocaleLowerCase();
 }
 
-function Icon({ name }: { name: string }): ReactElement {
-  return (
-    <span className="button-icon" aria-hidden="true">
-      {name}
-    </span>
-  );
-}
-
 function NoticeView({ notice }: { notice?: Notice }): ReactElement {
   return (
     <p className="page-notice" data-tone={notice?.tone ?? "info"} hidden={!notice?.message} aria-live="polite">
@@ -75,33 +81,80 @@ function NoticeView({ notice }: { notice?: Notice }): ReactElement {
   );
 }
 
-function SecondaryPage({
+function IconButton({
+  icon: Icon,
   title,
-  subtitle,
-  onBack,
+  danger = false,
+  disabled = false,
+  className,
+  onClick,
+}: {
+  icon: LucideIcon;
+  title: string;
+  danger?: boolean;
+  disabled?: boolean;
+  className?: string;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      className={["icon-button", danger ? "is-danger" : "", className ?? ""].filter(Boolean).join(" ")}
+      aria-label={title}
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <Icon />
+    </button>
+  );
+}
+
+function WorkspacePageFrame({
+  icon: Icon,
+  title,
+  titleTooltip,
   children,
 }: {
+  icon: LucideIcon;
   title: string;
-  subtitle: string;
-  onBack: () => void;
+  titleTooltip?: string;
   children: ReactNode;
 }): ReactElement {
   return (
     <>
-      <header className="page-bar">
-        <button className="compact-button icon-button-text" type="button" aria-label="Back" onClick={onBack}>
-          <Icon name="←" />
-          <span>Back</span>
-        </button>
-        <div className="page-heading">
-          <h1 className="page-title">{title}</h1>
-          <p className="page-subtitle" title={subtitle}>
-            {subtitle}
-          </p>
+      <header className="workspace-header">
+        <div className="workspace-identity">
+          <Icon size={22} />
+          <h1 title={titleTooltip}>{title}</h1>
         </div>
       </header>
-      <div className="page-content">{children}</div>
+      <div className="overview-content">{children}</div>
     </>
+  );
+}
+
+function WorkspaceModalView({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}): ReactElement {
+  return (
+    <div className="modal-overlay" role="presentation" onMouseDown={onClose}>
+      <section
+        className="modal-window"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        {children}
+      </section>
+    </div>
   );
 }
 
@@ -134,15 +187,15 @@ function Sidebar({
       </header>
       <div className="sidebar-actions">
         <button className="sidebar-action" type="button" onClick={onNew} title="New repository">
-          <Icon name="+" />
+          <Plus size={14} />
           <span>New</span>
         </button>
         <button className="sidebar-action" type="button" onClick={onOpen} title="Open repository">
-          <Icon name="□" />
+          <FolderOpen size={14} />
           <span>Open</span>
         </button>
         <button className="sidebar-action" type="button" onClick={onImport} title="Import repository">
-          <Icon name="⇩" />
+          <Download size={14} />
           <span>Import</span>
         </button>
       </div>
@@ -176,28 +229,24 @@ function Sidebar({
               <span className="repository-path">{unavailable.has(repository.path) ? "Unavailable" : repository.path}</span>
             </div>
             <div className="repository-actions">
-              <button
-                type="button"
-                className="row-action icon-button"
+              <IconButton
+                className="row-action"
+                icon={repository.pinned ? Pin : PinOff}
                 title={repository.pinned ? "Unpin repository" : "Pin repository"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onTogglePin(repository.path);
                 }}
-              >
-                <Icon name={repository.pinned ? "⌂" : "⌃"} />
-              </button>
-              <button
-                type="button"
-                className="row-action icon-button"
+              />
+              <IconButton
+                className="row-action"
+                icon={Archive}
                 title="Archive repository"
                 onClick={(event) => {
                   event.stopPropagation();
                   onArchive(repository.path);
                 }}
-              >
-                <Icon name="×" />
-              </button>
+              />
             </div>
           </div>
         ))}
@@ -218,23 +267,41 @@ function EmptyWorkspace(): ReactElement {
   );
 }
 
+function CenteredActionPanel({
+  icon: Icon,
+  title,
+  children,
+}: {
+  icon: LucideIcon;
+  title: string;
+  children: ReactNode;
+}): ReactElement {
+  return (
+    <div className="centered-action-panel">
+      <div className="action-panel-heading">
+        <Icon size={22} />
+        <h1>{title}</h1>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function NewRepositoryPage({
   notice,
   busy,
-  onBack,
   onBrowse,
   onSubmit,
 }: {
   notice?: Notice;
   busy: boolean;
-  onBack: () => void;
   onBrowse: () => Promise<string | undefined>;
   onSubmit: (parentPath: string, name: string) => void;
 }): ReactElement {
   const [parentPath, setParentPath] = useState("");
   const [name, setName] = useState("");
   return (
-    <SecondaryPage title="New Repository" subtitle="Create a repository directory in a selected location" onBack={onBack}>
+    <CenteredActionPanel icon={Plus} title="New Repository">
       <form
         className="form-panel"
         onSubmit={(event) => {
@@ -255,7 +322,7 @@ function NewRepositoryPage({
                 if (selected) setParentPath(selected);
               }}
             >
-              <Icon name="□" />
+              <FolderOpen size={14} />
               <span>Browse</span>
             </button>
           </span>
@@ -271,21 +338,19 @@ function NewRepositoryPage({
         </div>
         <NoticeView notice={notice} />
       </form>
-    </SecondaryPage>
+    </CenteredActionPanel>
   );
 }
 
 function ImportRepositoryPage({
   notice,
   busy,
-  onBack,
   onBrowseArchive,
   onBrowseDestination,
   onSubmit,
 }: {
   notice?: Notice;
   busy: boolean;
-  onBack: () => void;
   onBrowseArchive: () => Promise<string | undefined>;
   onBrowseDestination: () => Promise<string | undefined>;
   onSubmit: (archivePath: string, destination: string) => void;
@@ -293,7 +358,7 @@ function ImportRepositoryPage({
   const [archivePath, setArchivePath] = useState("");
   const [destination, setDestination] = useState("");
   return (
-    <SecondaryPage title="Import Repository" subtitle="Import a tar archive into an empty directory" onBack={onBack}>
+    <CenteredActionPanel icon={Download} title="Import Repository">
       <form
         className="form-panel"
         onSubmit={(event) => {
@@ -320,7 +385,7 @@ function ImportRepositoryPage({
                 if (selected) setArchivePath(selected);
               }}
             >
-              <Icon name="□" />
+              <FolderOpen size={14} />
               <span>Browse</span>
             </button>
           </span>
@@ -338,7 +403,7 @@ function ImportRepositoryPage({
                 if (selected) setDestination(selected);
               }}
             >
-              <Icon name="□" />
+              <FolderOpen size={14} />
               <span>Browse</span>
             </button>
           </span>
@@ -350,104 +415,61 @@ function ImportRepositoryPage({
         </div>
         <NoticeView notice={notice} />
       </form>
-    </SecondaryPage>
+    </CenteredActionPanel>
   );
 }
 
-function OverviewPage({
-  repository,
+function SnapshotList({
   snapshots,
-  notice,
   busySnapshotId,
-  onAdd,
-  onExport,
-  onRefresh,
   onRestore,
   onDelete,
 }: {
-  repository: RepositoryRecord;
   snapshots: SnapshotInfo[] | undefined;
-  notice?: Notice;
   busySnapshotId?: string;
-  onAdd: () => void;
-  onExport: () => void;
-  onRefresh: () => void;
   onRestore: (snapshotId: string) => void;
   onDelete: (snapshot: SnapshotInfo) => void;
 }): ReactElement {
   return (
-    <>
-      <header className="workspace-header">
-        <div className="workspace-identity">
-          <p className="eyebrow">Repository</p>
-          <h1>{repository.name}</h1>
-          <p className="workspace-path" title={repository.path}>{repository.path}</p>
-        </div>
-        <div className="workspace-actions">
-          <button type="button" className="primary-button icon-button-text" onClick={onAdd}>
-            <Icon name="+" />
-            <span>Add Snapshot</span>
-          </button>
-          <button type="button" className="secondary-button icon-button-text" onClick={onExport}>
-            <Icon name="⇧" />
-            <span>Export Repository</span>
-          </button>
-        </div>
-      </header>
-      <div className="overview-content">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">History</p>
-            <h2>Snapshots</h2>
+    <div className="snapshot-list">
+      {!snapshots ? <p className="snapshot-empty">Loading snapshots...</p> : null}
+      {snapshots?.length === 0 ? <p className="snapshot-empty">No snapshots in this repository</p> : null}
+      {snapshots?.map((snapshot) => (
+        <article
+          className="snapshot-row"
+          key={snapshot.id}
+          tabIndex={0}
+          onClick={(event) => {
+            if (!(event.target instanceof HTMLButtonElement)) onRestore(snapshot.id);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onRestore(snapshot.id);
+            }
+          }}
+        >
+          <div className="snapshot-details">
+            <h3>{snapshot.title?.trim() || "Untitled"}</h3>
+            <p>
+              {formatSnapshotTime(snapshot)} / {snapshot.fileCount} files / {formatBytes(snapshot.byteCount)}
+            </p>
+            <code>{snapshot.id}</code>
           </div>
-          <button type="button" className="compact-button icon-button-text" onClick={onRefresh}>
-            <Icon name="↻" />
-            <span>Refresh</span>
-          </button>
-        </div>
-        <NoticeView notice={notice} />
-        <div className="snapshot-list">
-          {!snapshots ? <p className="snapshot-empty">Loading snapshots...</p> : null}
-          {snapshots?.length === 0 ? <p className="snapshot-empty">No snapshots in this repository</p> : null}
-          {snapshots?.map((snapshot) => (
-            <article
-              className="snapshot-row"
-              key={snapshot.id}
-              tabIndex={0}
-              onClick={(event) => {
-                if (!(event.target instanceof HTMLButtonElement)) onRestore(snapshot.id);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onRestore(snapshot.id);
-                }
-              }}
-            >
-              <div className="snapshot-details">
-                <h3>{snapshot.title?.trim() || "Untitled"}</h3>
-                <p>
-                  {formatSnapshotTime(snapshot)} / {snapshot.fileCount} files / {formatBytes(snapshot.byteCount)}
-                </p>
-                <code>{snapshot.id}</code>
-              </div>
-              <button
-                type="button"
-                className="danger-button snapshot-delete icon-button"
-                title="Delete snapshot"
-                disabled={busySnapshotId === snapshot.id}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDelete(snapshot);
-                }}
-              >
-                <Icon name="×" />
-              </button>
-            </article>
-          ))}
-        </div>
-      </div>
-    </>
+          <IconButton
+            className="snapshot-delete"
+            icon={X}
+            title="Delete snapshot"
+            danger
+            disabled={busySnapshotId === snapshot.id}
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete(snapshot);
+            }}
+          />
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -470,9 +492,7 @@ function SourceList({
       {sourcePaths.map((source, index) => (
         <div className="source-row" key={`${source}-${index}`}>
           <span title={source}>{source}</span>
-          <button type="button" className="compact-button icon-button" title="Remove source" onClick={() => onRemove(index)}>
-            <Icon name="×" />
-          </button>
+          <IconButton icon={X} title="Remove source" onClick={() => onRemove(index)} />
         </div>
       ))}
     </div>
@@ -485,7 +505,6 @@ function AddSnapshotPage({
   notice,
   busy,
   encryptionPassword,
-  onBack,
   onBrowseSource,
   onChangeDraft,
   onChangeFilter,
@@ -498,7 +517,6 @@ function AddSnapshotPage({
   notice?: Notice;
   busy: boolean;
   encryptionPassword: string;
-  onBack: () => void;
   onBrowseSource: () => void;
   onChangeDraft: <K extends keyof RepositoryWorkspace>(field: K, value: RepositoryWorkspace[K]) => void;
   onChangeFilter: <K extends keyof BackupFilterDraft>(field: K, value: BackupFilterDraft[K]) => void;
@@ -507,87 +525,86 @@ function AddSnapshotPage({
   onSubmit: () => void;
 }): ReactElement {
   return (
-    <SecondaryPage title="Add Snapshot" subtitle={repository.path} onBack={onBack}>
-      <form
-        className="form-panel wide-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="field-group">
-          <div className="group-heading">
-            <div>
-              <h2>Source directories</h2>
-              <p>Add one or more directories to this snapshot.</p>
-            </div>
-            <button type="button" className="secondary-button icon-button-text" onClick={onBrowseSource} disabled={busy}>
-              <Icon name="+" />
-              <span>Add</span>
-            </button>
+    <form
+      className="form-panel"
+      aria-label={`Add snapshot to ${repository.name}`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <div className="field-group">
+        <div className="group-heading">
+          <div>
+            <h2>Source directories</h2>
+            <p>Add one or more directories to this snapshot.</p>
           </div>
-          <SourceList sourcePaths={draft.sourcePaths} onRemove={onRemoveSource} />
-        </div>
-        <div className="form-grid two-columns">
-          <label>
-            Compression algorithm
-            <select
-              value={draft.compressionAlgorithm}
-              disabled={busy}
-              onChange={(event) => onChangeDraft("compressionAlgorithm", event.target.value === "zstd" ? "zstd" : "none")}
-            >
-              <option value="none">None</option>
-              <option value="zstd">zstd</option>
-            </select>
-          </label>
-          <label>
-            Encryption algorithm
-            <select
-              value={draft.encryptionAlgorithm}
-              disabled={busy}
-              onChange={(event) => {
-                const value = event.target.value === "aes-256-gcm" ? "aes-256-gcm" : "none";
-                onChangeDraft("encryptionAlgorithm", value);
-                if (value === "none") onPasswordChange("");
-              }}
-            >
-              <option value="none">None</option>
-              <option value="aes-256-gcm">AES-256-GCM</option>
-            </select>
-          </label>
-          {draft.encryptionAlgorithm === "aes-256-gcm" ? (
-            <label>
-              Encryption password
-              <input value={encryptionPassword} onChange={(event) => onPasswordChange(event.target.value)} disabled={busy} type="password" autoComplete="new-password" />
-            </label>
-          ) : null}
-          <label>
-            Snapshot title
-            <input value={draft.snapshotTitle} disabled={busy} onChange={(event) => onChangeDraft("snapshotTitle", event.target.value)} type="text" maxLength={120} autoComplete="off" />
-          </label>
-        </div>
-        <details className="advanced-panel" open={draft.filtersOpen} onToggle={(event) => onChangeDraft("filtersOpen", event.currentTarget.open)}>
-          <summary>Advanced filters</summary>
-          <div className="form-grid three-columns">
-            <label>Include path contains<input value={draft.filter.includePath} disabled={busy} onChange={(event) => onChangeFilter("includePath", event.target.value)} autoComplete="off" /></label>
-            <label>Exclude path contains<input value={draft.filter.excludePath} disabled={busy} onChange={(event) => onChangeFilter("excludePath", event.target.value)} autoComplete="off" /></label>
-            <label>Extensions<input value={draft.filter.extensions} disabled={busy} onChange={(event) => onChangeFilter("extensions", event.target.value)} autoComplete="off" placeholder="txt;png" /></label>
-            <label>Include file name contains<input value={draft.filter.includeName} disabled={busy} onChange={(event) => onChangeFilter("includeName", event.target.value)} autoComplete="off" /></label>
-            <label>Exclude file name contains<input value={draft.filter.excludeName} disabled={busy} onChange={(event) => onChangeFilter("excludeName", event.target.value)} autoComplete="off" /></label>
-            <label>Minimum size<input value={draft.filter.minSize} disabled={busy} onChange={(event) => onChangeFilter("minSize", event.target.value)} type="number" min="0" step="1" /></label>
-            <label>Maximum size<input value={draft.filter.maxSize} disabled={busy} onChange={(event) => onChangeFilter("maxSize", event.target.value)} type="number" min="0" step="1" /></label>
-            <label>Modified after<input value={draft.filter.modifiedAfter} disabled={busy} onChange={(event) => onChangeFilter("modifiedAfter", event.target.value)} type="datetime-local" /></label>
-            <label>Modified before<input value={draft.filter.modifiedBefore} disabled={busy} onChange={(event) => onChangeFilter("modifiedBefore", event.target.value)} type="datetime-local" /></label>
-          </div>
-        </details>
-        <div className="form-actions">
-          <button type="submit" className="primary-button" disabled={busy}>
-            Add Snapshot
+          <button type="button" className="secondary-button source-add-button icon-button-text" onClick={onBrowseSource} disabled={busy}>
+            <Plus size={14} />
+            <span>Add</span>
           </button>
         </div>
-        <NoticeView notice={notice} />
-      </form>
-    </SecondaryPage>
+        <SourceList sourcePaths={draft.sourcePaths} onRemove={onRemoveSource} />
+      </div>
+      <div className="form-grid two-columns">
+        <label className="full-row">
+          Snapshot title
+          <input value={draft.snapshotTitle} disabled={busy} onChange={(event) => onChangeDraft("snapshotTitle", event.target.value)} type="text" maxLength={120} autoComplete="off" />
+        </label>
+        <label>
+          Compression algorithm
+          <select
+            value={draft.compressionAlgorithm}
+            disabled={busy}
+            onChange={(event) => onChangeDraft("compressionAlgorithm", event.target.value === "zstd" ? "zstd" : "none")}
+          >
+            <option value="none">None</option>
+            <option value="zstd">zstd</option>
+          </select>
+        </label>
+        <label>
+          Encryption algorithm
+          <select
+            value={draft.encryptionAlgorithm}
+            disabled={busy}
+            onChange={(event) => {
+              const value = event.target.value === "aes-256-gcm" ? "aes-256-gcm" : "none";
+              onChangeDraft("encryptionAlgorithm", value);
+              if (value === "none") onPasswordChange("");
+            }}
+          >
+            <option value="none">None</option>
+            <option value="aes-256-gcm">AES-256-GCM</option>
+          </select>
+        </label>
+        {draft.encryptionAlgorithm === "aes-256-gcm" ? (
+          <label className="full-row">
+            Encryption password
+            <input value={encryptionPassword} onChange={(event) => onPasswordChange(event.target.value)} disabled={busy} type="password" autoComplete="new-password" />
+          </label>
+        ) : null}
+      </div>
+      <details className="advanced-panel" open={draft.filtersOpen} onToggle={(event) => onChangeDraft("filtersOpen", event.currentTarget.open)}>
+        <summary>Advanced filters</summary>
+        <div className="form-grid three-columns">
+          <label>Include path contains<input value={draft.filter.includePath} disabled={busy} onChange={(event) => onChangeFilter("includePath", event.target.value)} autoComplete="off" /></label>
+          <label>Exclude path contains<input value={draft.filter.excludePath} disabled={busy} onChange={(event) => onChangeFilter("excludePath", event.target.value)} autoComplete="off" /></label>
+          <label>Extensions<input value={draft.filter.extensions} disabled={busy} onChange={(event) => onChangeFilter("extensions", event.target.value)} autoComplete="off" placeholder="txt;png" /></label>
+          <label>Include file name contains<input value={draft.filter.includeName} disabled={busy} onChange={(event) => onChangeFilter("includeName", event.target.value)} autoComplete="off" /></label>
+          <label>Exclude file name contains<input value={draft.filter.excludeName} disabled={busy} onChange={(event) => onChangeFilter("excludeName", event.target.value)} autoComplete="off" /></label>
+          <label>Minimum size<input value={draft.filter.minSize} disabled={busy} onChange={(event) => onChangeFilter("minSize", event.target.value)} type="number" min="0" step="1" /></label>
+          <label>Maximum size<input value={draft.filter.maxSize} disabled={busy} onChange={(event) => onChangeFilter("maxSize", event.target.value)} type="number" min="0" step="1" /></label>
+          <label>Modified after<input value={draft.filter.modifiedAfter} disabled={busy} onChange={(event) => onChangeFilter("modifiedAfter", event.target.value)} type="datetime-local" /></label>
+          <label>Modified before<input value={draft.filter.modifiedBefore} disabled={busy} onChange={(event) => onChangeFilter("modifiedBefore", event.target.value)} type="datetime-local" /></label>
+        </div>
+      </details>
+      <div className="form-actions">
+        <button type="submit" className="primary-button" disabled={busy}>
+          Add Snapshot
+        </button>
+      </div>
+      <NoticeView notice={notice} />
+    </form>
   );
 }
 
@@ -596,7 +613,6 @@ function ExportRepositoryPage({
   draft,
   notice,
   busy,
-  onBack,
   onChangeExportPath,
   onBrowse,
   onSubmit,
@@ -605,44 +621,42 @@ function ExportRepositoryPage({
   draft: RepositoryWorkspace;
   notice?: Notice;
   busy: boolean;
-  onBack: () => void;
   onChangeExportPath: (value: string) => void;
   onBrowse: () => void;
   onSubmit: () => void;
 }): ReactElement {
   return (
-    <SecondaryPage title="Export Repository" subtitle={repository.path} onBack={onBack}>
-      <form
-        className="form-panel"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <label>
-          Archive algorithm
-          <select disabled>
-            <option value="tar">tar</option>
-          </select>
-        </label>
-        <label>
-          Export file
-          <span className="path-control">
-            <input value={draft.exportPath} disabled={busy} onChange={(event) => onChangeExportPath(event.target.value)} autoComplete="off" />
-            <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
-              <Icon name="□" />
-              <span>Browse</span>
-            </button>
-          </span>
-        </label>
-        <div className="form-actions">
-          <button type="submit" className="primary-button" disabled={busy}>
-            Export Repository
+    <form
+      className="form-panel"
+      aria-label={`Export repository ${repository.name}`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <label>
+        Archive algorithm
+        <select disabled>
+          <option value="tar">tar</option>
+        </select>
+      </label>
+      <label>
+        Export file
+        <span className="path-control">
+          <input value={draft.exportPath} disabled={busy} onChange={(event) => onChangeExportPath(event.target.value)} autoComplete="off" />
+          <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
+            <FolderOpen size={14} />
+            <span>Browse</span>
           </button>
-        </div>
-        <NoticeView notice={notice} />
-      </form>
-    </SecondaryPage>
+        </span>
+      </label>
+      <div className="form-actions">
+        <button type="submit" className="primary-button" disabled={busy}>
+          Export Repository
+        </button>
+      </div>
+      <NoticeView notice={notice} />
+    </form>
   );
 }
 
@@ -653,7 +667,6 @@ function RestoreSnapshotPage({
   notice,
   busy,
   decryptionPassword,
-  onBack,
   onChangeDraft,
   onPasswordChange,
   onBrowse,
@@ -665,67 +678,65 @@ function RestoreSnapshotPage({
   notice?: Notice;
   busy: boolean;
   decryptionPassword: string;
-  onBack: () => void;
   onChangeDraft: <K extends keyof RepositoryWorkspace>(field: K, value: RepositoryWorkspace[K]) => void;
   onPasswordChange: (value: string) => void;
   onBrowse: () => void;
   onSubmit: () => void;
 }): ReactElement {
   return (
-    <SecondaryPage title="Restore Snapshot" subtitle={snapshot.title?.trim() || "Untitled"} onBack={onBack}>
-      <form
-        className="form-panel"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="snapshot-summary">
-          <span>Repository</span><strong>{repository.name}</strong>
-          <span>Created</span><strong>{formatSnapshotTime(snapshot)}</strong>
-          <span>Snapshot ID</span><code>{snapshot.id}</code>
-        </div>
+    <form
+      className="form-panel"
+      aria-label={`Restore snapshot ${snapshot.title?.trim() || "Untitled"} from ${repository.name}`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <div className="snapshot-summary">
+        <span>Snapshot</span><strong>{snapshot.title?.trim() || "Untitled"}</strong>
+        <span>Created</span><strong>{formatSnapshotTime(snapshot)}</strong>
+        <span>Snapshot ID</span><code>{snapshot.id}</code>
+      </div>
+      <label>
+        Restore directory
+        <span className="path-control">
+          <input value={draft.restoreDestination} disabled={busy} onChange={(event) => onChangeDraft("restoreDestination", event.target.value)} autoComplete="off" />
+          <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
+            <FolderOpen size={14} />
+            <span>Browse</span>
+          </button>
+        </span>
+      </label>
+      <label>
+        Restore path strategy
+        <select value={draft.restorePathStrategy} disabled={busy} onChange={(event) => onChangeDraft("restorePathStrategy", event.target.value as RepositoryWorkspace["restorePathStrategy"])}>
+          <option value="preserveRelativePath">Preserve Relative Path</option>
+          <option value="preserveFullPath">Preserve Full Path</option>
+          <option value="flatten">Flatten</option>
+        </select>
+      </label>
+      {draft.restorePathStrategy === "flatten" ? (
         <label>
-          Restore directory
-          <span className="path-control">
-            <input value={draft.restoreDestination} disabled={busy} onChange={(event) => onChangeDraft("restoreDestination", event.target.value)} autoComplete="off" />
-            <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
-              <Icon name="□" />
-              <span>Browse</span>
-            </button>
-          </span>
-        </label>
-        <label>
-          Restore path strategy
-          <select value={draft.restorePathStrategy} disabled={busy} onChange={(event) => onChangeDraft("restorePathStrategy", event.target.value as RepositoryWorkspace["restorePathStrategy"])}>
-            <option value="preserveRelativePath">Preserve Relative Path</option>
-            <option value="preserveFullPath">Preserve Full Path</option>
-            <option value="flatten">Flatten</option>
+          Flatten conflict strategy
+          <select value={draft.flattenConflictStrategy} disabled={busy} onChange={(event) => onChangeDraft("flattenConflictStrategy", event.target.value as RepositoryWorkspace["flattenConflictStrategy"])}>
+            <option value="rename">Rename</option>
+            <option value="error">Error</option>
+            <option value="skip">Skip</option>
+            <option value="overwrite">Overwrite</option>
           </select>
         </label>
-        {draft.restorePathStrategy === "flatten" ? (
-          <label>
-            Flatten conflict strategy
-            <select value={draft.flattenConflictStrategy} disabled={busy} onChange={(event) => onChangeDraft("flattenConflictStrategy", event.target.value as RepositoryWorkspace["flattenConflictStrategy"])}>
-              <option value="rename">Rename</option>
-              <option value="error">Error</option>
-              <option value="skip">Skip</option>
-              <option value="overwrite">Overwrite</option>
-            </select>
-          </label>
-        ) : null}
-        <label>
-          Decryption password
-          <input value={decryptionPassword} disabled={busy} onChange={(event) => onPasswordChange(event.target.value)} type="password" autoComplete="current-password" />
-        </label>
-        <div className="form-actions">
-          <button type="submit" className="primary-button" disabled={busy}>
-            Restore Snapshot
-          </button>
-        </div>
-        <NoticeView notice={notice} />
-      </form>
-    </SecondaryPage>
+      ) : null}
+      <label>
+        Decryption password
+        <input value={decryptionPassword} disabled={busy} onChange={(event) => onPasswordChange(event.target.value)} type="password" autoComplete="current-password" />
+      </label>
+      <div className="form-actions">
+        <button type="submit" className="primary-button" disabled={busy}>
+          Restore Snapshot
+        </button>
+      </div>
+      <NoticeView notice={notice} />
+    </form>
   );
 }
 
@@ -748,9 +759,11 @@ function validateBackupDraft(draft: RepositoryWorkspace, password: string): stri
 export function App(): ReactElement {
   const [state, setState] = useState<AppState | null>(null);
   const [globalPage, setGlobalPage] = useState<GlobalPage>(null);
+  const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal>(null);
   const [globalNotice, setGlobalNotice] = useState<Notice | undefined>();
   const [notices, setNotices] = useState<Record<string, Notice>>({});
   const [snapshots, setSnapshots] = useState<SnapshotMap>({});
+  const [refreshFeedback, setRefreshFeedback] = useState<{ text: string; id: number } | undefined>();
   const [unavailable, setUnavailable] = useState<Set<string>>(() => new Set());
   const [isResizing, setIsResizing] = useState(false);
   const [busy, setBusy] = useState<string | undefined>();
@@ -828,6 +841,13 @@ export function App(): ReactElement {
     setDecryptionPassword("");
   }
 
+function closeWorkspaceModal(): void {
+    if (workspace?.route.kind === "restore") setRoute({ kind: "overview" });
+    setWorkspaceModal(null);
+    setEncryptionPassword("");
+    setDecryptionPassword("");
+  }
+
   function setNotice(path: string, route: WorkspaceRoute["kind"], notice: Notice): void {
     setNotices((current) => ({ ...current, [noticeKey(path, route)]: notice }));
   }
@@ -839,7 +859,7 @@ export function App(): ReactElement {
     });
   }
 
-  async function refreshSnapshots(path: string, announce = true): Promise<void> {
+  async function refreshSnapshots(path: string, announce = true): Promise<number | undefined> {
     try {
       const list = await repositoryApi.listSnapshots(path);
       setSnapshots((current) => ({ ...current, [path]: list }));
@@ -853,9 +873,11 @@ export function App(): ReactElement {
         reconcileSnapshotRoute(target, new Set(list.map((item) => item.id)));
       });
       if (announce) setNotice(path, "overview", { tone: "success", message: `Loaded ${list.length} snapshot${list.length === 1 ? "" : "s"}.` });
+      return list.length;
     } catch (error) {
       setUnavailable((current) => new Set(current).add(path));
       setNotice(path, "overview", { tone: "error", message: String(error) });
+      return undefined;
     }
   }
 
@@ -924,18 +946,12 @@ export function App(): ReactElement {
     return active ? notices[noticeKey(active.path, route)] : undefined;
   }
 
-  function closeGlobalPage(): void {
-    setGlobalPage(null);
-    setGlobalNotice(undefined);
-  }
-
   const workspaceContent = (() => {
     if (globalPage === "new") {
       return (
         <NewRepositoryPage
           notice={globalNotice}
           busy={busy === "new"}
-          onBack={closeGlobalPage}
           onBrowse={() => chooseDirectory("Choose repository parent")}
           onSubmit={async (parentPath, name) => {
             setBusy("new");
@@ -964,7 +980,6 @@ export function App(): ReactElement {
         <ImportRepositoryPage
           notice={globalNotice}
           busy={busy === "import"}
-          onBack={closeGlobalPage}
           onBrowseArchive={chooseTarArchive}
           onBrowseDestination={() => chooseDirectory("Choose import destination")}
           onSubmit={async (archivePath, destination) => {
@@ -992,15 +1007,84 @@ export function App(): ReactElement {
     }
     if (!active || active.archived || !workspace) return <EmptyWorkspace />;
 
-    if (workspace.route.kind === "add") {
-      return (
+    return (
+      <WorkspacePageFrame icon={FolderClosed} title={active.name} titleTooltip={active.path}>
+        <div className="snapshot-toolbar">
+          <div className="snapshot-toolbar-actions">
+            <button type="button" className="primary-button icon-button-text" onClick={() => setWorkspaceModal("add")}>
+              <Plus size={14} />
+              <span>Add Snapshot</span>
+            </button>
+            <button type="button" className="secondary-button icon-button-text" onClick={() => setWorkspaceModal("export")}>
+              <Upload size={14} />
+              <span>Export Repository</span>
+            </button>
+          </div>
+          <div className="snapshot-refresh-group">
+            {refreshFeedback ? (
+              <span className="refresh-feedback" key={refreshFeedback.id}>
+                {refreshFeedback.text}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="refresh-button icon-button-text"
+              onClick={async () => {
+                const before = snapshots[active.path]?.length ?? 0;
+                const after = await refreshSnapshots(active.path, false);
+                if (after === undefined) return;
+                const delta = after - before;
+                setRefreshFeedback({
+                  text: delta >= 0 ? `+${delta}` : String(delta),
+                  id: Date.now(),
+                });
+              }}
+            >
+              <RefreshCw size={14} />
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+        <SnapshotList
+          snapshots={snapshots[active.path]}
+          busySnapshotId={busySnapshotId}
+          onRestore={(snapshotId) => {
+            setRoute({ kind: "restore", snapshotId });
+            setWorkspaceModal("restore");
+          }}
+          onDelete={async (snapshot) => {
+            setBusySnapshotId(snapshot.id);
+            try {
+              const confirmed = await confirmSnapshotDeletion(snapshot.title?.trim() || "Untitled");
+              if (!confirmed) return;
+              setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
+              const result = await repositoryApi.deleteSnapshot(active.path, snapshot.id);
+              const warning = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
+              setNotice(active.path, "overview", {
+                tone: result.warnings.length > 0 ? "warning" : "success",
+                message: `Snapshot deleted. Removed ${result.deletedObjectCount} objects and reclaimed ${formatBytes(result.reclaimedBytes)}.${warning}`,
+              });
+              await refreshSnapshots(active.path, false);
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+            } finally {
+              setBusySnapshotId(undefined);
+            }
+          }}
+        />
+      </WorkspacePageFrame>
+    );
+  })();
+
+  const modalContent =
+    active && workspace && workspaceModal === "add" ? (
+      <WorkspaceModalView title="Add Snapshot" onClose={closeWorkspaceModal}>
         <AddSnapshotPage
           repository={active}
           draft={workspace}
           notice={workspaceNotice("add")}
           busy={busy === "backup"}
           encryptionPassword={encryptionPassword}
-          onBack={() => setRoute({ kind: "overview" })}
           onBrowseSource={async () => {
             const selected = await chooseDirectory("Add source directory");
             if (!selected) return;
@@ -1049,6 +1133,7 @@ export function App(): ReactElement {
                 }`,
               });
               await refreshSnapshots(active.path, false);
+              closeWorkspaceModal();
             } catch (error) {
               setNotice(active.path, "add", { tone: "error", message: String(error) });
             } finally {
@@ -1056,17 +1141,14 @@ export function App(): ReactElement {
             }
           }}
         />
-      );
-    }
-
-    if (workspace.route.kind === "export") {
-      return (
+      </WorkspaceModalView>
+    ) : active && workspace && workspaceModal === "export" ? (
+      <WorkspaceModalView title="Export Repository" onClose={closeWorkspaceModal}>
         <ExportRepositoryPage
           repository={active}
           draft={workspace}
           notice={workspaceNotice("export")}
           busy={busy === "export"}
-          onBack={() => setRoute({ kind: "overview" })}
           onChangeExportPath={(value) => updateWorkspace(active.path, (draft) => {
             draft.exportPath = value;
           })}
@@ -1089,87 +1171,55 @@ export function App(): ReactElement {
             }
           }}
         />
-      );
-    }
-
-    if (workspace.route.kind === "restore") {
-      const restoreRoute = workspace.route;
-      const snapshot = snapshots[active.path]?.find((item) => item.id === restoreRoute.snapshotId);
-      if (!snapshot) return <OverviewPage repository={active} snapshots={snapshots[active.path]} notice={workspaceNotice("overview")} onAdd={() => setRoute({ kind: "add" })} onExport={() => setRoute({ kind: "export" })} onRefresh={() => void refreshSnapshots(active.path)} onRestore={(snapshotId) => setRoute({ kind: "restore", snapshotId })} onDelete={() => undefined} />;
-      return (
-        <RestoreSnapshotPage
-          repository={active}
-          snapshot={snapshot}
-          draft={workspace}
-          notice={workspaceNotice("restore")}
-          busy={busy === "restore"}
-          decryptionPassword={decryptionPassword}
-          onBack={() => setRoute({ kind: "overview" })}
-          onChangeDraft={(field, value) => updateWorkspace(active.path, (draft) => {
-            draft[field] = value;
-          })}
-          onPasswordChange={setDecryptionPassword}
-          onBrowse={async () => {
-            const selected = await chooseDirectory("Choose restore destination");
-            if (selected) updateWorkspace(active.path, (draft) => {
-              draft.restoreDestination = selected;
-            });
-          }}
-          onSubmit={async () => {
-            setBusy("restore");
-            setNotice(active.path, "restore", { tone: "info", message: "Restoring snapshot..." });
-            try {
-              const result = await repositoryApi.restore({
-                repositoryPath: active.path,
-                snapshotId: snapshot.id,
-                destination: workspace.restoreDestination,
-                pathStrategy: workspace.restorePathStrategy,
-                flattenConflictStrategy: workspace.flattenConflictStrategy,
-                decryptionPassword,
-              });
-              setNotice(active.path, "restore", { tone: "success", message: `Restored ${result.fileCount} files (${formatBytes(result.byteCount)}).` });
-            } catch (error) {
-              setNotice(active.path, "restore", { tone: "error", message: String(error) });
-            } finally {
-              setBusy(undefined);
-            }
-          }}
-        />
-      );
-    }
-
-    return (
-      <OverviewPage
-        repository={active}
-        snapshots={snapshots[active.path]}
-        notice={workspaceNotice("overview")}
-        busySnapshotId={busySnapshotId}
-        onAdd={() => setRoute({ kind: "add" })}
-        onExport={() => setRoute({ kind: "export" })}
-        onRefresh={() => void refreshSnapshots(active.path)}
-        onRestore={(snapshotId) => setRoute({ kind: "restore", snapshotId })}
-        onDelete={async (snapshot) => {
-          setBusySnapshotId(snapshot.id);
-          try {
-            const confirmed = await confirmSnapshotDeletion(snapshot.title?.trim() || "Untitled");
-            if (!confirmed) return;
-            setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
-            const result = await repositoryApi.deleteSnapshot(active.path, snapshot.id);
-            const warning = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
-            setNotice(active.path, "overview", {
-              tone: result.warnings.length > 0 ? "warning" : "success",
-              message: `Snapshot deleted. Removed ${result.deletedObjectCount} objects and reclaimed ${formatBytes(result.reclaimedBytes)}.${warning}`,
-            });
-            await refreshSnapshots(active.path, false);
-          } catch (error) {
-            setNotice(active.path, "overview", { tone: "error", message: String(error) });
-          } finally {
-            setBusySnapshotId(undefined);
-          }
-        }}
-      />
-    );
-  })();
+      </WorkspaceModalView>
+    ) : active && workspace && workspaceModal === "restore" && workspace.route.kind === "restore" ? (
+      (() => {
+        const restoreRoute = workspace.route;
+        const snapshot = snapshots[active.path]?.find((item) => item.id === restoreRoute.snapshotId);
+        if (!snapshot) return null;
+        return (
+          <WorkspaceModalView title="Restore Snapshot" onClose={closeWorkspaceModal}>
+            <RestoreSnapshotPage
+              repository={active}
+              snapshot={snapshot}
+              draft={workspace}
+              notice={workspaceNotice("restore")}
+              busy={busy === "restore"}
+              decryptionPassword={decryptionPassword}
+              onChangeDraft={(field, value) => updateWorkspace(active.path, (draft) => {
+                draft[field] = value;
+              })}
+              onPasswordChange={setDecryptionPassword}
+              onBrowse={async () => {
+                const selected = await chooseDirectory("Choose restore destination");
+                if (selected) updateWorkspace(active.path, (draft) => {
+                  draft.restoreDestination = selected;
+                });
+              }}
+              onSubmit={async () => {
+                setBusy("restore");
+                setNotice(active.path, "restore", { tone: "info", message: "Restoring snapshot..." });
+                try {
+                  const result = await repositoryApi.restore({
+                    repositoryPath: active.path,
+                    snapshotId: snapshot.id,
+                    destination: workspace.restoreDestination,
+                    pathStrategy: workspace.restorePathStrategy,
+                    flattenConflictStrategy: workspace.flattenConflictStrategy,
+                    decryptionPassword,
+                  });
+                  setNotice(active.path, "restore", { tone: "success", message: `Restored ${result.fileCount} files (${formatBytes(result.byteCount)}).` });
+                } catch (error) {
+                  setNotice(active.path, "restore", { tone: "error", message: String(error) });
+                } finally {
+                  setBusy(undefined);
+                }
+              }}
+            />
+          </WorkspaceModalView>
+        );
+      })()
+    ) : null;
 
   return (
     <main id="app-shell" className={isResizing ? "is-resizing" : undefined}>
@@ -1229,6 +1279,7 @@ export function App(): ReactElement {
       <section id="workspace" aria-label="Workspace">
         {workspaceContent}
       </section>
+      {modalContent}
     </main>
   );
 }
