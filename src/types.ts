@@ -60,6 +60,7 @@ export type RepositoryWorkspace = {
 export type AppState = {
   version: 1;
   sidebarWidth: number;
+  sidebarCollapsed: boolean;
   sidebarSections: SidebarSectionState;
   repositories: RepositoryRecord[];
   activeRepositoryPath?: string;

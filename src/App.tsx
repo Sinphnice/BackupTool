@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Archive,
   ChevronRight,
@@ -6,6 +7,10 @@ import {
   Plus,
   FolderOpen,
   Download,
+  Maximize2,
+  Minus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pin,
   PinOff,
   X,
@@ -68,6 +73,10 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 380;
 const MIN_REFRESH_ANIMATION_MS = 450;
 const REFRESH_FEEDBACK_DELAY_MS = 120;
+
+function hasTauriRuntime(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
 
 function noticeKey(path: string, route: WorkspaceRoute["kind"]): string {
   return `${path}\n${route}`;
@@ -141,6 +150,69 @@ function IconButton({
     >
       <Icon />
     </button>
+  );
+}
+
+function AppTitleBar({
+  sidebarCollapsed,
+  onToggleSidebar,
+}: {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+}): ReactElement {
+  const appWindow = hasTauriRuntime() ? getCurrentWindow() : undefined;
+  const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose;
+
+  return (
+    <header id="app-titlebar">
+      <div className="titlebar-leading">
+        <IconButton
+          className="titlebar-sidebar-toggle"
+          icon={SidebarIcon}
+          title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSidebar();
+          }}
+        />
+      </div>
+      <div
+        className="titlebar-drag-region"
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !appWindow) return;
+          void appWindow.startDragging();
+        }}
+        onDoubleClick={() => {
+          if (appWindow) void appWindow.toggleMaximize();
+        }}
+      />
+      <div className="titlebar-window-controls">
+        <IconButton
+          className="titlebar-window-button"
+          icon={Minus}
+          title="Minimize"
+          onClick={() => {
+            if (appWindow) void appWindow.minimize();
+          }}
+        />
+        <IconButton
+          className="titlebar-window-button"
+          icon={Maximize2}
+          title="Maximize or restore"
+          onClick={() => {
+            if (appWindow) void appWindow.toggleMaximize();
+          }}
+        />
+        <IconButton
+          className="titlebar-window-button titlebar-close-button"
+          icon={X}
+          title="Close"
+          onClick={() => {
+            if (appWindow) void appWindow.close();
+          }}
+        />
+      </div>
+    </header>
   );
 }
 
@@ -1427,12 +1499,22 @@ function closeWorkspaceModal(): void {
     });
   }
 
+  function toggleSidebarCollapsed(): void {
+    updateState((draft) => {
+      draft.sidebarCollapsed = !draft.sidebarCollapsed;
+    });
+    setIsResizing(false);
+  }
+
   if (!state) {
     return (
-      <main id="app-shell">
-        <section id="workspace" className="shadow" aria-label="Workspace">
-          <EmptyWorkspace />
-        </section>
+      <main id="app-shell" className="is-sidebar-collapsed">
+        <AppTitleBar sidebarCollapsed={false} onToggleSidebar={() => undefined} />
+        <div id="app-content">
+          <section id="workspace" className="shadow" aria-label="Workspace">
+            <EmptyWorkspace />
+          </section>
+        </div>
       </main>
     );
   }
@@ -1714,65 +1796,80 @@ function closeWorkspaceModal(): void {
     ) : null;
 
   return (
-    <main id="app-shell" className={isResizing ? "is-resizing" : undefined}>
-      <Sidebar
-        state={state}
-        unavailable={unavailable}
-        globalPageActive={globalPage !== null}
-        onNew={() => {
-          setGlobalPage("new");
-          setGlobalNotice(undefined);
-        }}
-        onOpen={async () => {
-          const selected = await chooseDirectory("Open repository");
-          if (selected) await openAndActivateRepository(selected);
-        }}
-        onImport={() => {
-          setGlobalPage("import");
-          setGlobalNotice(undefined);
-        }}
-        onActivate={changeActiveRepository}
-        onTogglePin={togglePin}
-        onArchive={archiveRepository}
-        onToggleSection={toggleSidebarSection}
-        onReorder={reorderRepositorySection}
-      />
-      <div
-        id="sidebar-resizer"
-        role="separator"
-        aria-label="Resize repository sidebar"
-        aria-orientation="vertical"
-        aria-valuemin={MIN_SIDEBAR_WIDTH}
-        aria-valuemax={MAX_SIDEBAR_WIDTH}
-        aria-valuenow={state.sidebarWidth}
-        tabIndex={0}
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setIsResizing(true);
-        }}
-        onPointerMove={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) updateSidebarWidth(event.clientX);
-        }}
-        onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-          setIsResizing(false);
-        }}
-        onPointerCancel={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-          setIsResizing(false);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowLeft") updateSidebarWidth(state.sidebarWidth - 10);
-          else if (event.key === "ArrowRight") updateSidebarWidth(state.sidebarWidth + 10);
-          else if (event.key === "Home") updateSidebarWidth(MIN_SIDEBAR_WIDTH);
-          else if (event.key === "End") updateSidebarWidth(MAX_SIDEBAR_WIDTH);
-          else return;
-          event.preventDefault();
-        }}
-      />
-      <section id="workspace" className="shadow" aria-label="Workspace">
-        {workspaceContent}
-      </section>
+    <main
+      id="app-shell"
+      className={[
+        isResizing ? "is-resizing" : "",
+        state.sidebarCollapsed ? "is-sidebar-collapsed" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <AppTitleBar sidebarCollapsed={state.sidebarCollapsed} onToggleSidebar={toggleSidebarCollapsed} />
+      <div id="app-content">
+        {!state.sidebarCollapsed ? (
+          <>
+            <Sidebar
+              state={state}
+              unavailable={unavailable}
+              globalPageActive={globalPage !== null}
+              onNew={() => {
+                setGlobalPage("new");
+                setGlobalNotice(undefined);
+              }}
+              onOpen={async () => {
+                const selected = await chooseDirectory("Open repository");
+                if (selected) await openAndActivateRepository(selected);
+              }}
+              onImport={() => {
+                setGlobalPage("import");
+                setGlobalNotice(undefined);
+              }}
+              onActivate={changeActiveRepository}
+              onTogglePin={togglePin}
+              onArchive={archiveRepository}
+              onToggleSection={toggleSidebarSection}
+              onReorder={reorderRepositorySection}
+            />
+            <div
+              id="sidebar-resizer"
+              role="separator"
+              aria-label="Resize repository sidebar"
+              aria-orientation="vertical"
+              aria-valuemin={MIN_SIDEBAR_WIDTH}
+              aria-valuemax={MAX_SIDEBAR_WIDTH}
+              aria-valuenow={state.sidebarWidth}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setIsResizing(true);
+              }}
+              onPointerMove={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) updateSidebarWidth(event.clientX);
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                setIsResizing(false);
+              }}
+              onPointerCancel={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                setIsResizing(false);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowLeft") updateSidebarWidth(state.sidebarWidth - 10);
+                else if (event.key === "ArrowRight") updateSidebarWidth(state.sidebarWidth + 10);
+                else if (event.key === "Home") updateSidebarWidth(MIN_SIDEBAR_WIDTH);
+                else if (event.key === "End") updateSidebarWidth(MAX_SIDEBAR_WIDTH);
+                else return;
+                event.preventDefault();
+              }}
+            />
+          </>
+        ) : null}
+        <section id="workspace" className="shadow" aria-label="Workspace">
+          {workspaceContent}
+        </section>
+      </div>
       {modalContent}
     </main>
   );

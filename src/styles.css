@@ -6,6 +6,7 @@
   --sidebar-width: 260px;
   --sidebar-resizer-width: 10px;
   --sidebar-resizer-line-width: 1px;
+  --titlebar-height: 34px;
   --bg: #FFFFFF;
   --fg: #0D0D0D;
   --accent: #0169CC;
@@ -66,9 +67,83 @@ button {
 
 #app-shell {
   position: relative;
-  display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  isolation: isolate;
+  overflow: hidden;
   background: var(--bg);
+}
+
+#app-titlebar {
+  position: relative;
+  z-index: 0;
+  display: grid;
+  height: var(--titlebar-height);
+  min-height: var(--titlebar-height);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: stretch;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+.titlebar-leading,
+.titlebar-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.titlebar-leading {
+  padding-left: 8px;
+}
+
+.titlebar-window-controls {
+  padding-right: 6px;
+}
+
+.titlebar-drag-region {
+  min-width: 0;
+  cursor: default;
+}
+
+.titlebar-sidebar-toggle,
+.titlebar-window-button {
+  --icon-button-size: 16px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 5px;
+  color: var(--icon-muted);
+}
+
+.titlebar-sidebar-toggle:hover,
+.titlebar-sidebar-toggle:focus-visible,
+.titlebar-window-button:hover,
+.titlebar-window-button:focus-visible {
+  color: var(--fg);
+  background: var(--surface-soft);
+}
+
+.titlebar-close-button:hover,
+.titlebar-close-button:focus-visible {
+  color: var(--bg);
+  background: var(--error);
+}
+
+#app-content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  overflow: visible;
+  background: var(--bg);
+}
+
+#app-shell.is-sidebar-collapsed #app-content {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 #repository-sidebar {

@@ -47,6 +47,7 @@ export function createState(): AppState {
   return {
     version: 1,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    sidebarCollapsed: false,
     sidebarSections: {
       pinnedExpanded: true,
       repositoriesExpanded: true,
@@ -149,6 +150,7 @@ function sanitizeState(value: unknown): AppState {
       typeof value.sidebarWidth === "number"
         ? Math.min(380, Math.max(220, value.sidebarWidth))
         : DEFAULT_SIDEBAR_WIDTH,
+    sidebarCollapsed: value.sidebarCollapsed === true,
     sidebarSections: {
       pinnedExpanded:
         isObject(value.sidebarSections) && typeof value.sidebarSections.pinnedExpanded === "boolean"
