@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   createState,
   ensureWorkspace,
+  reorderRepositories,
   reconcileSnapshotRoute,
+  setRepositoryPinned,
   upsertRepository,
-  visibleRepositories,
+  visiblePinnedRepositories,
+  visibleUnpinnedRepositories,
 } from "./state";
 
 describe("repository UI state", () => {
@@ -20,15 +23,31 @@ describe("repository UI state", () => {
     expect(state.activeRepositoryPath).toBe(reopened.path);
   });
 
-  it("sorts pinned repositories before recently opened repositories", () => {
+  it("separates pinned repositories from the regular repository list", () => {
     const state = createState();
     const older = upsertRepository(state, { path: "C:\\older", name: "Older" });
     older.lastOpenedAt = 10;
     const newer = upsertRepository(state, { path: "C:\\newer", name: "Newer" });
     newer.lastOpenedAt = 20;
-    older.pinned = true;
+    setRepositoryPinned(state, older.path, true);
 
-    expect(visibleRepositories(state).map((item) => item.name)).toEqual(["Older", "Newer"]);
+    expect(visiblePinnedRepositories(state).map((item) => item.name)).toEqual(["Older"]);
+    expect(visibleUnpinnedRepositories(state).map((item) => item.name)).toEqual(["Newer"]);
+  });
+
+  it("keeps explicit repository order after drag reordering", () => {
+    const state = createState();
+    const first = upsertRepository(state, { path: "C:\\first", name: "First" });
+    const second = upsertRepository(state, { path: "C:\\second", name: "Second" });
+    const third = upsertRepository(state, { path: "C:\\third", name: "Third" });
+
+    reorderRepositories(state, false, [third.path, first.path, second.path]);
+
+    expect(visibleUnpinnedRepositories(state).map((item) => item.name)).toEqual([
+      "Third",
+      "First",
+      "Second",
+    ]);
   });
 
   it("keeps independent non-sensitive drafts for each repository", () => {

@@ -47,6 +47,10 @@ export function createState(): AppState {
   return {
     version: 1,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    sidebarSections: {
+      pinnedExpanded: true,
+      repositoriesExpanded: true,
+    },
     repositories: [],
     workspaces: {},
   };
@@ -116,7 +120,7 @@ function workspaceValue(value: unknown): RepositoryWorkspace {
 function sanitizeState(value: unknown): AppState {
   if (!isObject(value) || value.version !== 1) return createState();
   const repositories = Array.isArray(value.repositories)
-    ? value.repositories.flatMap((item): RepositoryRecord[] => {
+    ? value.repositories.flatMap((item, index): RepositoryRecord[] => {
         if (!isObject(item) || typeof item.path !== "string" || typeof item.name !== "string") {
           return [];
         }
@@ -128,6 +132,7 @@ function sanitizeState(value: unknown): AppState {
             archived: item.archived === true,
             lastOpenedAt:
               typeof item.lastOpenedAt === "number" ? item.lastOpenedAt : Date.now(),
+            listOrder: typeof item.listOrder === "number" ? item.listOrder : index,
           },
         ];
       })
@@ -144,6 +149,16 @@ function sanitizeState(value: unknown): AppState {
       typeof value.sidebarWidth === "number"
         ? Math.min(380, Math.max(220, value.sidebarWidth))
         : DEFAULT_SIDEBAR_WIDTH,
+    sidebarSections: {
+      pinnedExpanded:
+        isObject(value.sidebarSections) && typeof value.sidebarSections.pinnedExpanded === "boolean"
+          ? value.sidebarSections.pinnedExpanded
+          : true,
+      repositoriesExpanded:
+        isObject(value.sidebarSections) && typeof value.sidebarSections.repositoriesExpanded === "boolean"
+          ? value.sidebarSections.repositoriesExpanded
+          : true,
+    },
     repositories,
     activeRepositoryPath:
       typeof value.activeRepositoryPath === "string" ? value.activeRepositoryPath : undefined,
@@ -203,7 +218,23 @@ export function ensureWorkspace(state: AppState, path: string): RepositoryWorksp
   return state.workspaces[path];
 }
 
-export function upsertRepository(state: AppState, info: RepositoryInfo): RepositoryRecord {
+function nextListOrder(state: AppState, pinned: boolean): number {
+  return (
+    Math.max(
+      -1,
+      ...state.repositories
+        .filter((repository) => !repository.archived && repository.pinned === pinned)
+        .map((repository) => repository.listOrder),
+    ) + 1
+  );
+}
+
+export function upsertRepository(
+  state: AppState,
+  info: RepositoryInfo,
+  options: { updateLastOpenedAt?: boolean } = {},
+): RepositoryRecord {
+  const updateLastOpenedAt = options.updateLastOpenedAt ?? true;
   const key = pathKey(info.path);
   let repository = state.repositories.find((item) => pathKey(item.path) === key);
   if (!repository) {
@@ -212,6 +243,7 @@ export function upsertRepository(state: AppState, info: RepositoryInfo): Reposit
       pinned: false,
       archived: false,
       lastOpenedAt: Date.now(),
+      listOrder: nextListOrder(state, false),
     };
     state.repositories.push(repository);
   } else {
@@ -219,7 +251,7 @@ export function upsertRepository(state: AppState, info: RepositoryInfo): Reposit
     repository.path = info.path;
     repository.name = info.name;
     repository.archived = false;
-    repository.lastOpenedAt = Date.now();
+    if (updateLastOpenedAt) repository.lastOpenedAt = Date.now();
     if (oldPath !== info.path && state.workspaces[oldPath]) {
       state.workspaces[info.path] = state.workspaces[oldPath];
       delete state.workspaces[oldPath];
@@ -233,10 +265,32 @@ export function upsertRepository(state: AppState, info: RepositoryInfo): Reposit
 export function visibleRepositories(state: AppState): RepositoryRecord[] {
   return state.repositories
     .filter((repository) => !repository.archived)
-    .sort(
-      (left, right) =>
-        Number(right.pinned) - Number(left.pinned) || right.lastOpenedAt - left.lastOpenedAt,
-    );
+    .sort((left, right) => left.listOrder - right.listOrder || right.lastOpenedAt - left.lastOpenedAt);
+}
+
+export function visiblePinnedRepositories(state: AppState): RepositoryRecord[] {
+  return visibleRepositories(state).filter((repository) => repository.pinned);
+}
+
+export function visibleUnpinnedRepositories(state: AppState): RepositoryRecord[] {
+  return visibleRepositories(state).filter((repository) => !repository.pinned);
+}
+
+export function setRepositoryPinned(state: AppState, path: string, pinned: boolean): void {
+  const repository = state.repositories.find((item) => item.path === path);
+  if (!repository || repository.pinned === pinned) return;
+  repository.pinned = pinned;
+  repository.listOrder = nextListOrder(state, pinned);
+}
+
+export function reorderRepositories(state: AppState, pinned: boolean, orderedPaths: readonly string[]): void {
+  const orderByPath = new Map(orderedPaths.map((path, index) => [path, index]));
+  for (const repository of state.repositories) {
+    const order = orderByPath.get(repository.path);
+    if (order !== undefined && !repository.archived && repository.pinned === pinned) {
+      repository.listOrder = order;
+    }
+  }
 }
 
 export function reconcileSnapshotRoute(

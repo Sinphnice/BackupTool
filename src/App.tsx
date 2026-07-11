@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
 import {
   Archive,
+  ChevronRight,
+  Folder,
   Plus,
   FolderOpen,
   Download,
@@ -25,10 +27,13 @@ import {
   createWorkspace,
   ensureWorkspace,
   loadState,
+  reorderRepositories,
   reconcileSnapshotRoute,
   scheduleStateSave,
+  setRepositoryPinned,
   upsertRepository,
-  visibleRepositories,
+  visiblePinnedRepositories,
+  visibleUnpinnedRepositories,
 } from "./state";
 import type {
   AppState,
@@ -40,12 +45,29 @@ import type {
 } from "./types";
 
 type Notice = { tone: "info" | "success" | "error" | "warning"; message: string };
+type FormValidation<Field extends string> = { message: string; fields: Field[] };
 type GlobalPage = "new" | "import" | null;
 type WorkspaceModal = "add" | "export" | "restore" | null;
 type SnapshotMap = Record<string, SnapshotInfo[] | undefined>;
+type RepositorySectionKind = "pinned" | "repositories";
+type RepositoryDragState = {
+  path: string;
+  name: string;
+  section: RepositorySectionKind;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+  x: number;
+  y: number;
+  isDragging: boolean;
+  insertIndex: number;
+};
 
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 380;
+const MIN_REFRESH_ANIMATION_MS = 450;
+const REFRESH_FEEDBACK_DELAY_MS = 120;
 
 function noticeKey(path: string, route: WorkspaceRoute["kind"]): string {
   return `${path}\n${route}`;
@@ -81,6 +103,18 @@ function NoticeView({ notice }: { notice?: Notice }): ReactElement {
   );
 }
 
+function InlineFormNotice({ notice }: { notice?: Notice }): ReactElement {
+  return (
+    <span className="form-inline-notice" data-tone={notice?.tone ?? "info"} hidden={!notice?.message} aria-live="polite">
+      {notice?.message}
+    </span>
+  );
+}
+
+function inputStateClass(invalid: boolean): string | undefined {
+  return invalid ? "is-invalid" : undefined;
+}
+
 function IconButton({
   icon: Icon,
   title,
@@ -110,30 +144,6 @@ function IconButton({
   );
 }
 
-function WorkspacePageFrame({
-  icon: Icon,
-  title,
-  titleTooltip,
-  children,
-}: {
-  icon: LucideIcon;
-  title: string;
-  titleTooltip?: string;
-  children: ReactNode;
-}): ReactElement {
-  return (
-    <>
-      <header className="workspace-header">
-        <div className="workspace-identity">
-          <Icon size={22} />
-          <h1 title={titleTooltip}>{title}</h1>
-        </div>
-      </header>
-      <div className="overview-content">{children}</div>
-    </>
-  );
-}
-
 function WorkspaceModalView({
   title,
   onClose,
@@ -146,7 +156,7 @@ function WorkspaceModalView({
   return (
     <div className="modal-overlay" role="presentation" onMouseDown={onClose}>
       <section
-        className="modal-window"
+        className="modal-window shadow"
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -168,6 +178,8 @@ function Sidebar({
   onActivate,
   onTogglePin,
   onArchive,
+  onToggleSection,
+  onReorder,
 }: {
   state: AppState;
   unavailable: ReadonlySet<string>;
@@ -178,8 +190,11 @@ function Sidebar({
   onActivate: (path: string) => void;
   onTogglePin: (path: string) => void;
   onArchive: (path: string) => void;
+  onToggleSection: (section: RepositorySectionKind) => void;
+  onReorder: (section: RepositorySectionKind, orderedPaths: string[]) => void;
 }): ReactElement {
-  const repositories = visibleRepositories(state);
+  const pinnedRepositories = visiblePinnedRepositories(state);
+  const repositories = visibleUnpinnedRepositories(state);
   return (
     <aside id="repository-sidebar" aria-label="Repositories">
       <header className="sidebar-header">
@@ -199,59 +214,252 @@ function Sidebar({
           <span>Import</span>
         </button>
       </div>
-      <div className="sidebar-section-title">Repositories</div>
-      <div className="repository-list" id="repository-list">
-        {repositories.length === 0 ? <p className="sidebar-empty">No repositories opened</p> : null}
-        {repositories.map((repository) => (
-          <div
-            className={[
-              "repository-row",
-              !globalPageActive && repository.path === state.activeRepositoryPath ? "is-active" : "",
-              unavailable.has(repository.path) ? "is-unavailable" : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            key={repository.path}
-            tabIndex={0}
-            title={repository.path}
-            onClick={(event) => {
-              if (!(event.target instanceof HTMLButtonElement)) onActivate(repository.path);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onActivate(repository.path);
-              }
-            }}
-          >
-            <div className="repository-details">
-              <span className="repository-name">{repository.name}</span>
-              <span className="repository-path">{unavailable.has(repository.path) ? "Unavailable" : repository.path}</span>
-            </div>
-            <div className="repository-actions">
-              <IconButton
-                className="row-action"
-                icon={repository.pinned ? Pin : PinOff}
-                title={repository.pinned ? "Unpin repository" : "Pin repository"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onTogglePin(repository.path);
-                }}
-              />
-              <IconButton
-                className="row-action"
-                icon={Archive}
-                title="Archive repository"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onArchive(repository.path);
-                }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
+      <RepositorySection
+        id="pinned-repository-list"
+        title="Pinned"
+        section="pinned"
+        repositories={pinnedRepositories}
+        expanded={state.sidebarSections.pinnedExpanded}
+        unavailable={unavailable}
+        globalPageActive={globalPageActive}
+        activeRepositoryPath={state.activeRepositoryPath}
+        onActivate={onActivate}
+        onTogglePin={onTogglePin}
+        onArchive={onArchive}
+        onToggleSection={onToggleSection}
+        onReorder={onReorder}
+      />
+      <RepositorySection
+        id="repository-list"
+        title="Repositories"
+        section="repositories"
+        repositories={repositories}
+        expanded={state.sidebarSections.repositoriesExpanded}
+        unavailable={unavailable}
+        globalPageActive={globalPageActive}
+        activeRepositoryPath={state.activeRepositoryPath}
+        onActivate={onActivate}
+        onTogglePin={onTogglePin}
+        onArchive={onArchive}
+        onToggleSection={onToggleSection}
+        onReorder={onReorder}
+      />
     </aside>
+  );
+}
+
+function RepositorySection({
+  id,
+  title,
+  section,
+  repositories,
+  expanded,
+  unavailable,
+  globalPageActive,
+  activeRepositoryPath,
+  onActivate,
+  onTogglePin,
+  onArchive,
+  onToggleSection,
+  onReorder,
+}: {
+  id: string;
+  title: string;
+  section: RepositorySectionKind;
+  repositories: RepositoryRecord[];
+  expanded: boolean;
+  unavailable: ReadonlySet<string>;
+  globalPageActive: boolean;
+  activeRepositoryPath?: string;
+  onActivate: (path: string) => void;
+  onTogglePin: (path: string) => void;
+  onArchive: (path: string) => void;
+  onToggleSection: (section: RepositorySectionKind) => void;
+  onReorder: (section: RepositorySectionKind, orderedPaths: string[]) => void;
+}): ReactElement | null {
+  const [dragState, setDragState] = useState<RepositoryDragState | undefined>();
+  const isPinnedSection = section === "pinned";
+  const draggedPath = dragState?.path;
+
+  useEffect(() => {
+    if (!dragState) return undefined;
+
+    function findInsertIndex(clientY: number): number {
+      const rows = Array.from(
+        document.querySelectorAll<HTMLElement>(`.repository-row[data-repository-section="${section}"]`),
+      );
+      const nextIndex = rows.findIndex((row) => {
+        const rect = row.getBoundingClientRect();
+        return clientY < rect.top + rect.height / 2;
+      });
+      return nextIndex === -1 ? rows.length : nextIndex;
+    }
+
+    function handlePointerMove(event: globalThis.PointerEvent): void {
+      const x = event.clientX;
+      const y = event.clientY;
+      setDragState((current) => {
+        if (!current) return current;
+        const distance = Math.hypot(x - current.startX, y - current.startY);
+        const isDragging = current.isDragging || distance >= 4;
+        return {
+          ...current,
+          x,
+          y,
+          isDragging,
+          insertIndex: isDragging ? findInsertIndex(y) : current.insertIndex,
+        };
+      });
+    }
+
+    function handlePointerUp(): void {
+      setDragState((current) => {
+        if (!current) return current;
+        if (!current.isDragging) {
+          onActivate(current.path);
+          return undefined;
+        }
+        const orderedPaths = repositories.map((repository) => repository.path);
+        const fromIndex = orderedPaths.indexOf(current.path);
+        if (fromIndex >= 0) {
+          const [dragged] = orderedPaths.splice(fromIndex, 1);
+          const adjustedInsertIndex =
+            fromIndex < current.insertIndex ? current.insertIndex - 1 : current.insertIndex;
+          orderedPaths.splice(Math.max(0, Math.min(adjustedInsertIndex, orderedPaths.length)), 0, dragged);
+          onReorder(section, orderedPaths);
+        }
+        return undefined;
+      });
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+    window.addEventListener("pointercancel", handlePointerUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, [dragState, onActivate, onReorder, repositories, section]);
+
+  if (repositories.length === 0) return null;
+
+  function startRepositoryDrag(event: PointerEvent<HTMLDivElement>, repository: RepositoryRecord): void {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const initialIndex = repositories.findIndex((item) => item.path === repository.path);
+    setDragState({
+      path: repository.path,
+      name: repository.name,
+      section,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      x: event.clientX,
+      y: event.clientY,
+      isDragging: false,
+      insertIndex: initialIndex < 0 ? 0 : initialIndex,
+    });
+  }
+
+  return (
+    <section className="repository-section" aria-labelledby={`${id}-title`}>
+      <button
+        id={`${id}-title`}
+        type="button"
+        className="sidebar-section-title"
+        aria-expanded={expanded}
+        aria-controls={id}
+        onClick={() => onToggleSection(section)}
+      >
+        <span>{title}</span>
+        <ChevronRight className="section-chevron" data-expanded={expanded ? "true" : "false"} size={13} />
+      </button>
+      {expanded ? (
+        <div className="repository-list" id={id}>
+          {repositories.map((repository, index) => {
+            const showInsertBefore =
+              dragState?.isDragging &&
+              dragState.insertIndex === index &&
+              dragState.path !== repository.path &&
+              repositories[index - 1]?.path !== dragState.path;
+            const showInsertAfter =
+              dragState?.isDragging &&
+              index === repositories.length - 1 &&
+              dragState.insertIndex === repositories.length &&
+              dragState.path !== repository.path;
+            return (
+            <div
+              className={[
+                "repository-row",
+                !globalPageActive && repository.path === activeRepositoryPath ? "is-active" : "",
+                unavailable.has(repository.path) ? "is-unavailable" : "",
+                draggedPath === repository.path ? "is-dragging" : "",
+                showInsertBefore ? "is-insert-before" : "",
+                showInsertAfter ? "is-insert-after" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              key={repository.path}
+              tabIndex={0}
+              title={repository.path}
+              data-repository-section={section}
+              data-repository-path={repository.path}
+              onPointerDown={(event) => startRepositoryDrag(event, repository)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onActivate(repository.path);
+                }
+              }}
+            >
+              <div className="repository-details">
+                <span className="repository-name">{repository.name}</span>
+                <span className="repository-path">{unavailable.has(repository.path) ? "Unavailable" : repository.path}</span>
+              </div>
+              <div className="repository-actions">
+                <IconButton
+                  className="row-action"
+                  icon={isPinnedSection ? PinOff : Pin}
+                  title={isPinnedSection ? "Unpin repository" : "Pin repository"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onTogglePin(repository.path);
+                  }}
+                />
+                <IconButton
+                  className="row-action"
+                  icon={Archive}
+                  title="Archive repository"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onArchive(repository.path);
+                  }}
+                />
+              </div>
+            </div>
+            );
+          })}
+          {dragState?.isDragging ? <RepositoryDragPreview dragState={dragState} /> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RepositoryDragPreview({ dragState }: { dragState: RepositoryDragState }): ReactElement {
+  return (
+    <div
+      className="repository-drag-preview"
+      style={{
+        transform: `translate(${dragState.x - dragState.offsetX}px, ${dragState.y - dragState.offsetY}px)`,
+      }}
+    >
+      <Folder size={14} />
+      <span>{dragState.name}</span>
+    </div>
   );
 }
 
@@ -270,17 +478,21 @@ function EmptyWorkspace(): ReactElement {
 function CenteredActionPanel({
   icon: Icon,
   title,
+  titleTooltip,
+  className,
   children,
 }: {
   icon: LucideIcon;
   title: string;
+  titleTooltip?: string;
+  className?: string;
   children: ReactNode;
 }): ReactElement {
   return (
-    <div className="centered-action-panel">
+    <div className={["centered-action-panel", className ?? ""].filter(Boolean).join(" ")}>
       <div className="action-panel-heading">
         <Icon size={22} />
-        <h1>{title}</h1>
+        <h1 title={titleTooltip}>{title}</h1>
       </div>
       {children}
     </div>
@@ -296,30 +508,66 @@ function NewRepositoryPage({
   notice?: Notice;
   busy: boolean;
   onBrowse: () => Promise<string | undefined>;
-  onSubmit: (parentPath: string, name: string) => void;
+  onSubmit: (parentPath: string, name: string) => Promise<boolean>;
 }): ReactElement {
   const [parentPath, setParentPath] = useState("");
   const [name, setName] = useState("");
+  const [invalidFields, setInvalidFields] = useState<Set<"parentPath" | "name">>(() => new Set());
+
+  function validate(): FormValidation<"parentPath" | "name"> | undefined {
+    const fields: Array<"parentPath" | "name"> = [];
+    if (!parentPath.trim()) fields.push("parentPath");
+    if (!name.trim()) fields.push("name");
+    return fields.length > 0 ? { message: "Fill in the highlighted fields.", fields } : undefined;
+  }
+
+  function clearInvalid(field: "parentPath" | "name"): void {
+    setInvalidFields((current) => {
+      if (!current.has(field)) return current;
+      const next = new Set(current);
+      next.delete(field);
+      return next;
+    });
+  }
+
   return (
     <CenteredActionPanel icon={Plus} title="New Repository">
       <form
-        className="form-panel"
-        onSubmit={(event) => {
+        className="form-panel bordered shadow"
+        onSubmit={async (event) => {
           event.preventDefault();
-          onSubmit(parentPath, name);
+          const validation = validate();
+          if (validation) {
+            setInvalidFields(new Set(validation.fields));
+            return;
+          }
+          const succeeded = await onSubmit(parentPath, name);
+          if (succeeded) setInvalidFields(new Set());
         }}
       >
         <label>
           Parent directory
           <span className="path-control">
-            <input value={parentPath} onChange={(event) => setParentPath(event.target.value)} disabled={busy} autoComplete="off" />
+            <input
+              className={inputStateClass(invalidFields.has("parentPath"))}
+              value={parentPath}
+              onChange={(event) => {
+                setParentPath(event.target.value);
+                clearInvalid("parentPath");
+              }}
+              disabled={busy}
+              autoComplete="off"
+            />
             <button
               type="button"
-              className="secondary-button icon-button-text"
+              className="secondary-button bordered-button icon-button-text"
               disabled={busy}
               onClick={async () => {
                 const selected = await onBrowse();
-                if (selected) setParentPath(selected);
+                if (selected) {
+                  setParentPath(selected);
+                  clearInvalid("parentPath");
+                }
               }}
             >
               <FolderOpen size={14} />
@@ -329,14 +577,24 @@ function NewRepositoryPage({
         </label>
         <label>
           Repository name
-          <input value={name} onChange={(event) => setName(event.target.value)} disabled={busy} autoComplete="off" maxLength={120} />
+          <input
+            className={inputStateClass(invalidFields.has("name"))}
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+              clearInvalid("name");
+            }}
+            disabled={busy}
+            autoComplete="off"
+            maxLength={120}
+          />
         </label>
         <div className="form-actions">
+          <InlineFormNotice notice={invalidFields.size > 0 ? { tone: "error", message: "Fill in the highlighted fields." } : notice} />
           <button type="submit" className="primary-button" disabled={busy}>
             Create Repository
           </button>
         </div>
-        <NoticeView notice={notice} />
       </form>
     </CenteredActionPanel>
   );
@@ -353,17 +611,41 @@ function ImportRepositoryPage({
   busy: boolean;
   onBrowseArchive: () => Promise<string | undefined>;
   onBrowseDestination: () => Promise<string | undefined>;
-  onSubmit: (archivePath: string, destination: string) => void;
+  onSubmit: (archivePath: string, destination: string) => Promise<boolean>;
 }): ReactElement {
   const [archivePath, setArchivePath] = useState("");
   const [destination, setDestination] = useState("");
+  const [invalidFields, setInvalidFields] = useState<Set<"archivePath" | "destination">>(() => new Set());
+
+  function validate(): FormValidation<"archivePath" | "destination"> | undefined {
+    const fields: Array<"archivePath" | "destination"> = [];
+    if (!archivePath.trim()) fields.push("archivePath");
+    if (!destination.trim()) fields.push("destination");
+    return fields.length > 0 ? { message: "Fill in the highlighted fields.", fields } : undefined;
+  }
+
+  function clearInvalid(field: "archivePath" | "destination"): void {
+    setInvalidFields((current) => {
+      if (!current.has(field)) return current;
+      const next = new Set(current);
+      next.delete(field);
+      return next;
+    });
+  }
+
   return (
     <CenteredActionPanel icon={Download} title="Import Repository">
       <form
-        className="form-panel"
-        onSubmit={(event) => {
+        className="form-panel bordered shadow"
+        onSubmit={async (event) => {
           event.preventDefault();
-          onSubmit(archivePath, destination);
+          const validation = validate();
+          if (validation) {
+            setInvalidFields(new Set(validation.fields));
+            return;
+          }
+          const succeeded = await onSubmit(archivePath, destination);
+          if (succeeded) setInvalidFields(new Set());
         }}
       >
         <label>
@@ -375,14 +657,26 @@ function ImportRepositoryPage({
         <label>
           Archive file
           <span className="path-control">
-            <input value={archivePath} onChange={(event) => setArchivePath(event.target.value)} disabled={busy} autoComplete="off" />
+            <input
+              className={inputStateClass(invalidFields.has("archivePath"))}
+              value={archivePath}
+              onChange={(event) => {
+                setArchivePath(event.target.value);
+                clearInvalid("archivePath");
+              }}
+              disabled={busy}
+              autoComplete="off"
+            />
             <button
               type="button"
-              className="secondary-button icon-button-text"
+              className="secondary-button bordered-button icon-button-text"
               disabled={busy}
               onClick={async () => {
                 const selected = await onBrowseArchive();
-                if (selected) setArchivePath(selected);
+                if (selected) {
+                  setArchivePath(selected);
+                  clearInvalid("archivePath");
+                }
               }}
             >
               <FolderOpen size={14} />
@@ -393,14 +687,26 @@ function ImportRepositoryPage({
         <label>
           Destination directory
           <span className="path-control">
-            <input value={destination} onChange={(event) => setDestination(event.target.value)} disabled={busy} autoComplete="off" />
+            <input
+              className={inputStateClass(invalidFields.has("destination"))}
+              value={destination}
+              onChange={(event) => {
+                setDestination(event.target.value);
+                clearInvalid("destination");
+              }}
+              disabled={busy}
+              autoComplete="off"
+            />
             <button
               type="button"
-              className="secondary-button icon-button-text"
+              className="secondary-button bordered-button icon-button-text"
               disabled={busy}
               onClick={async () => {
                 const selected = await onBrowseDestination();
-                if (selected) setDestination(selected);
+                if (selected) {
+                  setDestination(selected);
+                  clearInvalid("destination");
+                }
               }}
             >
               <FolderOpen size={14} />
@@ -409,11 +715,11 @@ function ImportRepositoryPage({
           </span>
         </label>
         <div className="form-actions">
+          <InlineFormNotice notice={invalidFields.size > 0 ? { tone: "error", message: "Fill in the highlighted fields." } : notice} />
           <button type="submit" className="primary-button" disabled={busy}>
             Import Repository
           </button>
         </div>
-        <NoticeView notice={notice} />
       </form>
     </CenteredActionPanel>
   );
@@ -473,6 +779,67 @@ function SnapshotList({
   );
 }
 
+function ViewRepositoryPage({
+  snapshots,
+  refreshFeedback,
+  isRefreshing,
+  busySnapshotId,
+  onAdd,
+  onExport,
+  onRefresh,
+  onRestore,
+  onDelete,
+}: {
+  snapshots: SnapshotInfo[] | undefined;
+  refreshFeedback?: { text: string; id: number };
+  isRefreshing: boolean;
+  busySnapshotId?: string;
+  onAdd: () => void;
+  onExport: () => void;
+  onRefresh: () => void;
+  onRestore: (snapshotId: string) => void;
+  onDelete: (snapshot: SnapshotInfo) => void;
+}): ReactElement {
+  return (
+    <form
+      className="form-panel bordered shadow repository-view-panel"
+      onSubmit={(event) => {
+        event.preventDefault();
+      }}
+    >
+      <div className="snapshot-toolbar">
+        <div className="snapshot-toolbar-actions">
+          <button type="button" className="primary-button icon-button-text" onClick={onAdd}>
+            <Plus size={14} />
+            <span>Add Snapshot</span>
+          </button>
+          <button type="button" className="secondary-button icon-button-text" onClick={onExport}>
+            <Upload size={14} />
+            <span>Export Repository</span>
+          </button>
+        </div>
+        <div className="snapshot-refresh-group">
+          {refreshFeedback ? (
+            <span className="refresh-feedback" key={refreshFeedback.id}>
+              {refreshFeedback.text}
+            </span>
+          ) : null}
+          <button type="button" className="refresh-button icon-button-text" onClick={onRefresh} aria-busy={isRefreshing}>
+            <RefreshCw className="refresh-icon" size={14} data-refreshing={isRefreshing ? "true" : "false"} />
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+      <SnapshotList
+        snapshots={snapshots}
+        busySnapshotId={busySnapshotId}
+        onRestore={onRestore}
+        onDelete={onDelete}
+      />
+    </form>
+  );
+}
+
 function SourceList({
   sourcePaths,
   onRemove,
@@ -522,15 +889,63 @@ function AddSnapshotPage({
   onChangeFilter: <K extends keyof BackupFilterDraft>(field: K, value: BackupFilterDraft[K]) => void;
   onRemoveSource: (index: number) => void;
   onPasswordChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: () => Promise<boolean>;
 }): ReactElement {
+  type AddField = "sources" | "encryptionPassword" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
+  const [invalidFields, setInvalidFields] = useState<Set<AddField>>(() => new Set());
+
+  function validate(): FormValidation<AddField> | undefined {
+    const fields: AddField[] = [];
+    const minimum = draft.filter.minSize ? Number(draft.filter.minSize) : undefined;
+    const maximum = draft.filter.maxSize ? Number(draft.filter.maxSize) : undefined;
+    if (draft.sourcePaths.length === 0) fields.push("sources");
+    if (draft.encryptionAlgorithm === "aes-256-gcm" && !encryptionPassword) fields.push("encryptionPassword");
+    if (minimum !== undefined && maximum !== undefined && minimum > maximum) fields.push("minSize", "maxSize");
+    if (
+      draft.filter.modifiedAfter &&
+      draft.filter.modifiedBefore &&
+      new Date(draft.filter.modifiedAfter) > new Date(draft.filter.modifiedBefore)
+    ) {
+      fields.push("modifiedAfter", "modifiedBefore");
+    }
+    return fields.length > 0 ? { message: "Fix the highlighted fields.", fields } : undefined;
+  }
+
+  function clearInvalid(field: AddField): void {
+    setInvalidFields((current) => {
+      if (!current.has(field)) return current;
+      const next = new Set(current);
+      next.delete(field);
+      return next;
+    });
+  }
+
+  function clearInvalidFields(fields: AddField[]): void {
+    setInvalidFields((current) => {
+      if (!fields.some((field) => current.has(field))) return current;
+      const next = new Set(current);
+      for (const field of fields) next.delete(field);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (draft.sourcePaths.length > 0) clearInvalid("sources");
+  }, [draft.sourcePaths.length]);
+
   return (
     <form
       className="form-panel"
       aria-label={`Add snapshot to ${repository.name}`}
-      onSubmit={(event) => {
+      onSubmit={async (event) => {
         event.preventDefault();
-        onSubmit();
+        const validation = validate();
+        if (validation) {
+          setInvalidFields(new Set(validation.fields));
+          return;
+        }
+        const succeeded = await onSubmit();
+        if (succeeded) setInvalidFields(new Set());
       }}
     >
       <div className="field-group">
@@ -539,12 +954,17 @@ function AddSnapshotPage({
             <h2>Source directories</h2>
             <p>Add one or more directories to this snapshot.</p>
           </div>
-          <button type="button" className="secondary-button source-add-button icon-button-text" onClick={onBrowseSource} disabled={busy}>
+          <button type="button" className="secondary-button bordered-button icon-button-text" onClick={onBrowseSource} disabled={busy}>
             <Plus size={14} />
             <span>Add</span>
           </button>
         </div>
-        <SourceList sourcePaths={draft.sourcePaths} onRemove={onRemoveSource} />
+        <div className={invalidFields.has("sources") ? "is-invalid-container" : undefined}>
+          <SourceList sourcePaths={draft.sourcePaths} onRemove={(index) => {
+            onRemoveSource(index);
+            clearInvalid("sources");
+          }} />
+        </div>
       </div>
       <div className="form-grid two-columns">
         <label className="full-row">
@@ -570,7 +990,10 @@ function AddSnapshotPage({
             onChange={(event) => {
               const value = event.target.value === "aes-256-gcm" ? "aes-256-gcm" : "none";
               onChangeDraft("encryptionAlgorithm", value);
-              if (value === "none") onPasswordChange("");
+              if (value === "none") {
+                onPasswordChange("");
+                clearInvalid("encryptionPassword");
+              }
             }}
           >
             <option value="none">None</option>
@@ -580,7 +1003,17 @@ function AddSnapshotPage({
         {draft.encryptionAlgorithm === "aes-256-gcm" ? (
           <label className="full-row">
             Encryption password
-            <input value={encryptionPassword} onChange={(event) => onPasswordChange(event.target.value)} disabled={busy} type="password" autoComplete="new-password" />
+            <input
+              className={inputStateClass(invalidFields.has("encryptionPassword"))}
+              value={encryptionPassword}
+              onChange={(event) => {
+                onPasswordChange(event.target.value);
+                clearInvalid("encryptionPassword");
+              }}
+              disabled={busy}
+              type="password"
+              autoComplete="new-password"
+            />
           </label>
         ) : null}
       </div>
@@ -592,18 +1025,30 @@ function AddSnapshotPage({
           <label>Extensions<input value={draft.filter.extensions} disabled={busy} onChange={(event) => onChangeFilter("extensions", event.target.value)} autoComplete="off" placeholder="txt;png" /></label>
           <label>Include file name contains<input value={draft.filter.includeName} disabled={busy} onChange={(event) => onChangeFilter("includeName", event.target.value)} autoComplete="off" /></label>
           <label>Exclude file name contains<input value={draft.filter.excludeName} disabled={busy} onChange={(event) => onChangeFilter("excludeName", event.target.value)} autoComplete="off" /></label>
-          <label>Minimum size<input value={draft.filter.minSize} disabled={busy} onChange={(event) => onChangeFilter("minSize", event.target.value)} type="number" min="0" step="1" /></label>
-          <label>Maximum size<input value={draft.filter.maxSize} disabled={busy} onChange={(event) => onChangeFilter("maxSize", event.target.value)} type="number" min="0" step="1" /></label>
-          <label>Modified after<input value={draft.filter.modifiedAfter} disabled={busy} onChange={(event) => onChangeFilter("modifiedAfter", event.target.value)} type="datetime-local" /></label>
-          <label>Modified before<input value={draft.filter.modifiedBefore} disabled={busy} onChange={(event) => onChangeFilter("modifiedBefore", event.target.value)} type="datetime-local" /></label>
+          <label>Minimum size<input className={inputStateClass(invalidFields.has("minSize"))} value={draft.filter.minSize} disabled={busy} onChange={(event) => {
+            onChangeFilter("minSize", event.target.value);
+            clearInvalidFields(["minSize", "maxSize"]);
+          }} type="number" min="0" step="1" /></label>
+          <label>Maximum size<input className={inputStateClass(invalidFields.has("maxSize"))} value={draft.filter.maxSize} disabled={busy} onChange={(event) => {
+            onChangeFilter("maxSize", event.target.value);
+            clearInvalidFields(["minSize", "maxSize"]);
+          }} type="number" min="0" step="1" /></label>
+          <label>Modified after<input className={inputStateClass(invalidFields.has("modifiedAfter"))} value={draft.filter.modifiedAfter} disabled={busy} onChange={(event) => {
+            onChangeFilter("modifiedAfter", event.target.value);
+            clearInvalidFields(["modifiedAfter", "modifiedBefore"]);
+          }} type="datetime-local" /></label>
+          <label>Modified before<input className={inputStateClass(invalidFields.has("modifiedBefore"))} value={draft.filter.modifiedBefore} disabled={busy} onChange={(event) => {
+            onChangeFilter("modifiedBefore", event.target.value);
+            clearInvalidFields(["modifiedAfter", "modifiedBefore"]);
+          }} type="datetime-local" /></label>
         </div>
       </details>
       <div className="form-actions">
+        <InlineFormNotice notice={invalidFields.size > 0 ? { tone: "error", message: "Fix the highlighted fields." } : notice} />
         <button type="submit" className="primary-button" disabled={busy}>
           Add Snapshot
         </button>
       </div>
-      <NoticeView notice={notice} />
     </form>
   );
 }
@@ -623,15 +1068,33 @@ function ExportRepositoryPage({
   busy: boolean;
   onChangeExportPath: (value: string) => void;
   onBrowse: () => void;
-  onSubmit: () => void;
+  onSubmit: () => Promise<boolean>;
 }): ReactElement {
+  const [invalidFields, setInvalidFields] = useState<Set<"exportPath">>(() => new Set());
+
+  function clearInvalid(): void {
+    setInvalidFields((current) => {
+      if (!current.has("exportPath")) return current;
+      return new Set();
+    });
+  }
+
+  useEffect(() => {
+    if (draft.exportPath.trim()) clearInvalid();
+  }, [draft.exportPath]);
+
   return (
     <form
       className="form-panel"
       aria-label={`Export repository ${repository.name}`}
-      onSubmit={(event) => {
+      onSubmit={async (event) => {
         event.preventDefault();
-        onSubmit();
+        if (!draft.exportPath.trim()) {
+          setInvalidFields(new Set(["exportPath"]));
+          return;
+        }
+        const succeeded = await onSubmit();
+        if (succeeded) setInvalidFields(new Set());
       }}
     >
       <label>
@@ -643,19 +1106,28 @@ function ExportRepositoryPage({
       <label>
         Export file
         <span className="path-control">
-          <input value={draft.exportPath} disabled={busy} onChange={(event) => onChangeExportPath(event.target.value)} autoComplete="off" />
-          <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
+          <input
+            className={inputStateClass(invalidFields.has("exportPath"))}
+            value={draft.exportPath}
+            disabled={busy}
+            onChange={(event) => {
+              onChangeExportPath(event.target.value);
+              clearInvalid();
+            }}
+            autoComplete="off"
+          />
+          <button type="button" className="secondary-button bordered-button icon-button-text" disabled={busy} onClick={onBrowse}>
             <FolderOpen size={14} />
             <span>Browse</span>
           </button>
         </span>
       </label>
       <div className="form-actions">
+        <InlineFormNotice notice={invalidFields.size > 0 ? { tone: "error", message: "Choose an export file." } : notice} />
         <button type="submit" className="primary-button" disabled={busy}>
           Export Repository
         </button>
       </div>
-      <NoticeView notice={notice} />
     </form>
   );
 }
@@ -701,7 +1173,7 @@ function RestoreSnapshotPage({
         Restore directory
         <span className="path-control">
           <input value={draft.restoreDestination} disabled={busy} onChange={(event) => onChangeDraft("restoreDestination", event.target.value)} autoComplete="off" />
-          <button type="button" className="secondary-button icon-button-text" disabled={busy} onClick={onBrowse}>
+          <button type="button" className="secondary-button bordered-button icon-button-text" disabled={busy} onClick={onBrowse}>
             <FolderOpen size={14} />
             <span>Browse</span>
           </button>
@@ -740,22 +1212,6 @@ function RestoreSnapshotPage({
   );
 }
 
-function validateBackupDraft(draft: RepositoryWorkspace, password: string): string | undefined {
-  if (draft.sourcePaths.length === 0) return "Add at least one source directory.";
-  if (draft.encryptionAlgorithm === "aes-256-gcm" && !password) return "Encryption password must not be empty.";
-  const minimum = draft.filter.minSize ? Number(draft.filter.minSize) : undefined;
-  const maximum = draft.filter.maxSize ? Number(draft.filter.maxSize) : undefined;
-  if (minimum !== undefined && maximum !== undefined && minimum > maximum) return "Minimum size must not exceed maximum size.";
-  if (
-    draft.filter.modifiedAfter &&
-    draft.filter.modifiedBefore &&
-    new Date(draft.filter.modifiedAfter) > new Date(draft.filter.modifiedBefore)
-  ) {
-    return "Modified after must not be later than modified before.";
-  }
-  return undefined;
-}
-
 export function App(): ReactElement {
   const [state, setState] = useState<AppState | null>(null);
   const [globalPage, setGlobalPage] = useState<GlobalPage>(null);
@@ -764,6 +1220,8 @@ export function App(): ReactElement {
   const [notices, setNotices] = useState<Record<string, Notice>>({});
   const [snapshots, setSnapshots] = useState<SnapshotMap>({});
   const [refreshFeedback, setRefreshFeedback] = useState<{ text: string; id: number } | undefined>();
+  const [refreshRequestInFlight, setRefreshRequestInFlight] = useState(false);
+  const [isRefreshingSnapshots, setIsRefreshingSnapshots] = useState(false);
   const [unavailable, setUnavailable] = useState<Set<string>>(() => new Set());
   const [isResizing, setIsResizing] = useState(false);
   const [busy, setBusy] = useState<string | undefined>();
@@ -905,14 +1363,51 @@ function closeWorkspaceModal(): void {
     }
   }
 
+  async function activateRepository(path: string): Promise<void> {
+    try {
+      const info = await repositoryApi.open(path);
+      let openedPath = info.path;
+      updateState((draft) => {
+        openedPath = upsertRepository(draft, info, { updateLastOpenedAt: false }).path;
+      });
+      setGlobalPage(null);
+      setUnavailable((current) => {
+        const next = new Set(current);
+        next.delete(path);
+        next.delete(openedPath);
+        return next;
+      });
+      await refreshSnapshots(openedPath, false);
+    } catch (error) {
+      setUnavailable((current) => new Set(current).add(path));
+      setNotice(path, "overview", { tone: "error", message: String(error) });
+    }
+  }
+
   function changeActiveRepository(path: string): void {
-    void openAndActivateRepository(path);
+    void activateRepository(path);
   }
 
   function togglePin(path: string): void {
     updateState((draft) => {
       const repository = repositoryByPath(draft, path);
-      if (repository) repository.pinned = !repository.pinned;
+      if (repository) setRepositoryPinned(draft, path, !repository.pinned);
+    });
+  }
+
+  function toggleSidebarSection(section: "pinned" | "repositories"): void {
+    updateState((draft) => {
+      if (section === "pinned") {
+        draft.sidebarSections.pinnedExpanded = !draft.sidebarSections.pinnedExpanded;
+      } else {
+        draft.sidebarSections.repositoriesExpanded = !draft.sidebarSections.repositoriesExpanded;
+      }
+    });
+  }
+
+  function reorderRepositorySection(section: "pinned" | "repositories", orderedPaths: string[]): void {
+    updateState((draft) => {
+      reorderRepositories(draft, section === "pinned", orderedPaths);
     });
   }
 
@@ -935,7 +1430,7 @@ function closeWorkspaceModal(): void {
   if (!state) {
     return (
       <main id="app-shell">
-        <section id="workspace" aria-label="Workspace">
+        <section id="workspace" className="shadow" aria-label="Workspace">
           <EmptyWorkspace />
         </section>
       </main>
@@ -966,8 +1461,10 @@ function closeWorkspaceModal(): void {
               setGlobalNotice(undefined);
               setNotice(openedPath, "overview", { tone: "success", message: "Repository created." });
               await refreshSnapshots(openedPath, false);
+              return true;
             } catch (error) {
               setGlobalNotice({ tone: "error", message: String(error) });
+              return false;
             } finally {
               setBusy(undefined);
             }
@@ -996,8 +1493,10 @@ function closeWorkspaceModal(): void {
               setGlobalNotice(undefined);
               setNotice(openedPath, "overview", { tone: "success", message: `Repository imported (${formatBytes(result.byteCount)}).` });
               await refreshSnapshots(openedPath, false);
+              return true;
             } catch (error) {
               setGlobalNotice({ tone: "error", message: String(error) });
+              return false;
             } finally {
               setBusy(undefined);
             }
@@ -1008,46 +1507,40 @@ function closeWorkspaceModal(): void {
     if (!active || active.archived || !workspace) return <EmptyWorkspace />;
 
     return (
-      <WorkspacePageFrame icon={FolderClosed} title={active.name} titleTooltip={active.path}>
-        <div className="snapshot-toolbar">
-          <div className="snapshot-toolbar-actions">
-            <button type="button" className="primary-button icon-button-text" onClick={() => setWorkspaceModal("add")}>
-              <Plus size={14} />
-              <span>Add Snapshot</span>
-            </button>
-            <button type="button" className="secondary-button icon-button-text" onClick={() => setWorkspaceModal("export")}>
-              <Upload size={14} />
-              <span>Export Repository</span>
-            </button>
-          </div>
-          <div className="snapshot-refresh-group">
-            {refreshFeedback ? (
-              <span className="refresh-feedback" key={refreshFeedback.id}>
-                {refreshFeedback.text}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className="refresh-button icon-button-text"
-              onClick={async () => {
-                const before = snapshots[active.path]?.length ?? 0;
-                const after = await refreshSnapshots(active.path, false);
-                if (after === undefined) return;
-                const delta = after - before;
-                setRefreshFeedback({
-                  text: delta >= 0 ? `+${delta}` : String(delta),
-                  id: Date.now(),
-                });
-              }}
-            >
-              <RefreshCw size={14} />
-              <span>Refresh</span>
-            </button>
-          </div>
-        </div>
-        <SnapshotList
+      <CenteredActionPanel icon={FolderClosed} title={active.name} titleTooltip={active.path}>
+        <ViewRepositoryPage
           snapshots={snapshots[active.path]}
+          refreshFeedback={refreshFeedback}
+          isRefreshing={isRefreshingSnapshots}
           busySnapshotId={busySnapshotId}
+          onAdd={() => setWorkspaceModal("add")}
+          onExport={() => setWorkspaceModal("export")}
+          onRefresh={async () => {
+            if (refreshRequestInFlight) return;
+            const before = snapshots[active.path]?.length ?? 0;
+            const animationStartedAt = performance.now();
+            setRefreshFeedback(undefined);
+            setRefreshRequestInFlight(true);
+            setIsRefreshingSnapshots(true);
+            let nextFeedback: { text: string; id: number } | undefined;
+            try {
+              const after = await refreshSnapshots(active.path, false);
+              if (after === undefined) return;
+              const delta = after - before;
+              nextFeedback = {
+                text: delta >= 0 ? `+${delta}` : String(delta),
+                id: Date.now(),
+              };
+            } finally {
+              setRefreshRequestInFlight(false);
+              const elapsed = performance.now() - animationStartedAt;
+              const remaining = Math.max(0, MIN_REFRESH_ANIMATION_MS - elapsed);
+              window.setTimeout(() => {
+                setIsRefreshingSnapshots(false);
+                if (nextFeedback) window.setTimeout(() => setRefreshFeedback(nextFeedback), REFRESH_FEEDBACK_DELAY_MS);
+              }, remaining);
+            }
+          }}
           onRestore={(snapshotId) => {
             setRoute({ kind: "restore", snapshotId });
             setWorkspaceModal("restore");
@@ -1072,7 +1565,7 @@ function closeWorkspaceModal(): void {
             }
           }}
         />
-      </WorkspacePageFrame>
+      </CenteredActionPanel>
     );
   })();
 
@@ -1104,11 +1597,6 @@ function closeWorkspaceModal(): void {
           })}
           onPasswordChange={setEncryptionPassword}
           onSubmit={async () => {
-            const validation = validateBackupDraft(workspace, encryptionPassword);
-            if (validation) {
-              setNotice(active.path, "add", { tone: "error", message: validation });
-              return;
-            }
             setBusy("backup");
             setNotice(active.path, "add", { tone: "info", message: "Adding snapshot..." });
             try {
@@ -1134,8 +1622,10 @@ function closeWorkspaceModal(): void {
               });
               await refreshSnapshots(active.path, false);
               closeWorkspaceModal();
+              return true;
             } catch (error) {
               setNotice(active.path, "add", { tone: "error", message: String(error) });
+              return false;
             } finally {
               setBusy(undefined);
             }
@@ -1164,8 +1654,10 @@ function closeWorkspaceModal(): void {
             try {
               const result = await repositoryApi.export(active.path, workspace.exportPath);
               setNotice(active.path, "export", { tone: "success", message: `Repository exported to ${result.path} (${formatBytes(result.byteCount)}).` });
+              return true;
             } catch (error) {
               setNotice(active.path, "export", { tone: "error", message: String(error) });
+              return false;
             } finally {
               setBusy(undefined);
             }
@@ -1242,6 +1734,8 @@ function closeWorkspaceModal(): void {
         onActivate={changeActiveRepository}
         onTogglePin={togglePin}
         onArchive={archiveRepository}
+        onToggleSection={toggleSidebarSection}
+        onReorder={reorderRepositorySection}
       />
       <div
         id="sidebar-resizer"
@@ -1276,7 +1770,7 @@ function closeWorkspaceModal(): void {
           event.preventDefault();
         }}
       />
-      <section id="workspace" aria-label="Workspace">
+      <section id="workspace" className="shadow" aria-label="Workspace">
         {workspaceContent}
       </section>
       {modalContent}

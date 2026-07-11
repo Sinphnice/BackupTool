@@ -7,6 +7,12 @@ export type RepositoryRecord = RepositoryInfo & {
   pinned: boolean;
   archived: boolean;
   lastOpenedAt: number;
+  listOrder: number;
+};
+
+export type SidebarSectionState = {
+  pinnedExpanded: boolean;
+  repositoriesExpanded: boolean;
 };
 
 export type SnapshotInfo = {
@@ -54,6 +60,7 @@ export type RepositoryWorkspace = {
 export type AppState = {
   version: 1;
   sidebarWidth: number;
+  sidebarSections: SidebarSectionState;
   repositories: RepositoryRecord[];
   activeRepositoryPath?: string;
   workspaces: Record<string, RepositoryWorkspace>;
