@@ -1,5 +1,6 @@
 .codex/
 .agents/
+.vs/
 
 node_modules/
 .pnpm-store/

@@ -20,6 +20,7 @@ import {
   Upload,
   RefreshCw,
   FolderClosed,
+  FolderLock,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -1474,7 +1475,7 @@ function RepositorySettingsPage({
       <div className="danger-zone">
         <h2>Danger zone</h2>
         {!confirmDelete ? (
-          <button type="button" className="danger-button icon-button-text" disabled={busy} onClick={() => setConfirmDelete(true)}>
+          <button type="button" className="danger-button bordered-button icon-button-text" disabled={busy} onClick={() => setConfirmDelete(true)}>
             <Trash2 size={14} />
             <span>Delete Repository</span>
           </button>
@@ -1528,6 +1529,18 @@ function RepositorySettingsPage({
   );
 }
 
+function SnapshotSummary({ snapshot }: { snapshot: SnapshotInfo }): ReactElement {
+  return (
+    <div className="snapshot-summary">
+      <span>Snapshot</span><strong>{snapshot.title?.trim() || "Untitled"}</strong>
+      <span>Created</span>{formatSnapshotTime(snapshot)}
+      <span>Snapshot ID</span><code>{snapshot.id}</code>
+      <span>Files</span>{snapshot.fileCount} files 
+      <span>Size</span>{formatBytes(snapshot.byteCount)}
+    </div>
+  );
+}
+
 function RestoreSnapshotPage({
   repository,
   snapshot,
@@ -1568,11 +1581,7 @@ function RestoreSnapshotPage({
         });
       }}
     >
-      <div className="snapshot-summary">
-        <span>Snapshot</span><strong>{snapshot.title?.trim() || "Untitled"}</strong>
-        <span>Created</span><strong>{formatSnapshotTime(snapshot)}</strong>
-        <span>Snapshot ID</span><code>{snapshot.id}</code>
-      </div>
+      <SnapshotSummary snapshot={snapshot} />
       <label>
         Restore directory
         <span className="path-control">
@@ -1658,11 +1667,7 @@ function DeleteSnapshotPage({
         if (!succeeded && snapshot.hasEncryptedObjects) setInvalidPassword(true);
       }}
     >
-      <div className="snapshot-summary">
-        <span>Snapshot</span><strong>{snapshot.title?.trim() || "Untitled"}</strong>
-        <span>Created</span><strong>{formatSnapshotTime(snapshot)}</strong>
-        <span>Snapshot ID</span><code>{snapshot.id}</code>
-      </div>
+      <SnapshotSummary snapshot={snapshot} />
       <p className="danger-copy">Delete this snapshot? Unreferenced objects will also be removed.</p>
       {snapshot.hasEncryptedObjects ? (
         <label>
@@ -1688,12 +1693,12 @@ function DeleteSnapshotPage({
               : notice
           }
         />
-        <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
+        <button type="button" className="secondary-button bordered-button" disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className="danger-button icon-button-text" disabled={busy}>
+        <button type="submit" className="danger-button bordered-button icon-button-text" disabled={busy}>
           <Trash2 size={14} />
-          <span>Delete Snapshot</span>
+          <span>Delete</span>
         </button>
       </div>
     </form>
@@ -2010,7 +2015,7 @@ function closeWorkspaceModal(): void {
 
     return (
       <CenteredActionPanel
-        icon={FolderClosed}
+        icon={active.encryptionAlgorithm !== "none" ? FolderLock : FolderClosed}
         title={active.name}
         titleTooltip={active.path}
         actions={
@@ -2063,27 +2068,8 @@ function closeWorkspaceModal(): void {
             setWorkspaceModal("restore");
           }}
           onDelete={async (snapshot) => {
-            if (snapshot.hasEncryptedObjects) {
-              setPendingDeleteSnapshot(snapshot);
-              setWorkspaceModal("deleteSnapshot");
-              return;
-            }
-            if (!window.confirm(`Delete snapshot "${snapshot.title?.trim() || "Untitled"}"? Unreferenced objects will also be removed.`)) return;
-            setBusySnapshotId(snapshot.id);
-            setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
-            try {
-              const result = await repositoryApi.deleteSnapshot(active.path, snapshot.id);
-              const warning = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
-              setNotice(active.path, "overview", {
-                tone: result.warnings.length > 0 ? "warning" : "success",
-                message: `Snapshot deleted. Removed ${result.deletedObjectCount} objects and reclaimed ${formatBytes(result.reclaimedBytes)}.${warning}`,
-              });
-              await refreshSnapshots(active.path, false);
-            } catch (error) {
-              setNotice(active.path, "overview", { tone: "error", message: String(error) });
-            } finally {
-              setBusySnapshotId(undefined);
-            }
+            setPendingDeleteSnapshot(snapshot);
+            setWorkspaceModal("deleteSnapshot");
           }}
         />
       </CenteredActionPanel>

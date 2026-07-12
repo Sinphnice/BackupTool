@@ -11,6 +11,7 @@
   --fg: #0D0D0D;
   --accent: #0169CC;
   --error: #C62828;
+  --danger: #C62828;
   --sidebar-base: color-mix(in srgb, var(--bg), var(--fg) 5%);
   --sidebar-hover: color-mix(in srgb, var(--bg), var(--fg) 10%);
   --sidebar-active: color-mix(in srgb, var(--bg), var(--accent) 10%);
@@ -20,12 +21,12 @@
   --surface-hover: color-mix(in srgb, var(--bg), var(--fg) 10%);
   --border: color-mix(in srgb, var(--bg), var(--fg) 15%);
   --ring: color-mix(in srgb, var(--bg), var(--accent) 35%);
+  --danger-ring: color-mix(in srgb, var(--bg), var(--danger) 35%);
   --text-muted: color-mix(in srgb, var(--fg), var(--bg) 35%);
   --text-subtle: color-mix(in srgb, var(--fg), var(--bg) 55%);
   --icon-muted: color-mix(in srgb, var(--fg), var(--bg) 35%);
   --accent-hover: color-mix(in srgb, var(--accent), var(--bg) 5%);
-  --danger: color-mix(in srgb, var(--fg), var(--accent) 35%);
-  --danger-hover: color-mix(in srgb, var(--bg), var(--danger) 10%);
+  --danger-hover: color-mix(in srgb, var(--danger), var(--bg) 5%);
   --success: color-mix(in srgb, var(--accent), var(--fg) 25%);
   --warning: color-mix(in srgb, var(--fg), var(--accent) 20%);
 }
@@ -731,13 +732,13 @@ button {
 }
 
 .danger-button {
-  color: var(--danger);
-  background: transparent;
+  color: var(--bg);
+  background: var(--danger);
 }
 
 .danger-button:hover,
 .danger-button:focus-visible {
-  outline: 2px solid var(--ring);
+  outline: 2px solid var(--danger-ring);
   background: var(--danger-hover);
 }
 
@@ -1144,6 +1145,12 @@ select.is-invalid,
   border-top: 1px solid var(--border);
 }
 
+.danger-zone h2 {
+  margin: 0;
+  color: var(--error);
+  font-size: 14px;
+}
+
 .unlock-zone,
 .password-zone {
   display: grid;
@@ -1155,12 +1162,6 @@ select.is-invalid,
 .password-zone h2 {
   margin: 0;
   color: var(--fg);
-  font-size: 14px;
-}
-
-.danger-zone h2 {
-  margin: 0;
-  color: var(--error);
   font-size: 14px;
 }
 
