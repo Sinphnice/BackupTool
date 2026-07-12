@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use regex::Regex;
 
 pub mod filesystem;
 pub mod repository;
@@ -15,9 +16,9 @@ pub use filesystem::{
 };
 pub use repository::{
     ArchiveAlgorithm, ArchiveResult, BackupOptions, CompressionAlgorithm, ContentHasher,
-    EncryptionAlgorithm, FileKind, ObjectId, ObjectStore, Repository, RepositoryReader,
-    RepositoryWriter, Snapshot, SnapshotDeleteResult, SnapshotEntry, SnapshotFile, SnapshotId,
-    SnapshotInfo, SourceInfo,
+    EncryptionAlgorithm, FileKind, ObjectId, ObjectStore, Repository, RepositoryMetadata,
+    RepositoryReader, RepositoryWriter, Snapshot, SnapshotDeleteResult, SnapshotEntry,
+    SnapshotFile, SnapshotId, SnapshotInfo, SourceInfo,
 };
 
 #[derive(Debug)]
@@ -100,11 +101,7 @@ pub type BackupCoreResult<T> = Result<T, BackupError>;
 /// include 列表为空表示不过滤；exclude 规则一旦匹配，优先排除对应文件。
 #[derive(Debug, Clone, Default)]
 pub struct BackupFilter {
-    pub include_path_contains: Vec<String>,
-    pub exclude_path_contains: Vec<String>,
-    pub extensions: Vec<String>,
-    pub include_name_contains: Vec<String>,
-    pub exclude_name_contains: Vec<String>,
+    pub path_regex: Option<String>,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
     pub modified_after: Option<i64>,
@@ -112,29 +109,17 @@ pub struct BackupFilter {
 }
 
 impl BackupFilter {
+    pub fn validate(&self) -> BackupCoreResult<()> {
+        self.compiled_path_regex().map(|_| ())
+    }
+
     /// 判断一个普通文件是否应该被复制到备份输出目录。
     pub fn allows(&self, relative_path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<bool> {
         let path_text = normalize_path_text(relative_path);
-        let name_text = relative_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-
-        if !contains_any_when_configured(&path_text, &self.include_path_contains) {
-            return Ok(false);
-        }
-        if contains_any(&path_text, &self.exclude_path_contains) {
-            return Ok(false);
-        }
-        if !contains_any_when_configured(&name_text, &self.include_name_contains) {
-            return Ok(false);
-        }
-        if contains_any(&name_text, &self.exclude_name_contains) {
-            return Ok(false);
-        }
-        if !self.extension_matches(relative_path) {
-            return Ok(false);
+        if let Some(regex) = self.compiled_path_regex()? {
+            if !regex.is_match(&path_text) {
+                return Ok(false);
+            }
         }
 
         let size = metadata.len();
@@ -162,23 +147,17 @@ impl BackupFilter {
         Ok(true)
     }
 
-    fn extension_matches(&self, relative_path: &Path) -> bool {
-        if self.extensions.is_empty() {
-            return true;
-        }
-
-        let extension = relative_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .trim_start_matches('.')
-            .to_lowercase();
-
-        self.extensions.iter().any(|configured| {
-            configured
-                .trim()
-                .trim_start_matches('.')
-                .eq_ignore_ascii_case(&extension)
+    fn compiled_path_regex(&self) -> BackupCoreResult<Option<Regex>> {
+        let Some(pattern) = self
+            .path_regex
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        Regex::new(pattern).map(Some).map_err(|error| {
+            BackupError::InvalidRepository(format!("invalid path regex: {error}"))
         })
     }
 }
@@ -189,18 +168,6 @@ fn normalize_path_text(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-        .to_lowercase()
-}
-
-fn contains_any(value: &str, fragments: &[String]) -> bool {
-    fragments.iter().any(|fragment| {
-        let fragment = fragment.trim().to_lowercase();
-        !fragment.is_empty() && value.contains(&fragment)
-    })
-}
-
-fn contains_any_when_configured(value: &str, fragments: &[String]) -> bool {
-    fragments.is_empty() || contains_any(value, fragments)
 }
 
 fn modified_unix_seconds(path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<i64> {

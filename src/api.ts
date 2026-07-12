@@ -29,11 +29,7 @@ function optionalText(value: string): string | undefined {
 
 function filterPayload(filter: BackupFilterDraft): Record<string, unknown> {
   return {
-    includePathContains: optionalText(filter.includePath),
-    excludePathContains: optionalText(filter.excludePath),
-    extensions: optionalText(filter.extensions),
-    includeNameContains: optionalText(filter.includeName),
-    excludeNameContains: optionalText(filter.excludeName),
+    pathRegex: optionalText(filter.pathRegex),
     minSize: optionalNumber(filter.minSize),
     maxSize: optionalNumber(filter.maxSize),
     modifiedAfter: optionalUnixSeconds(filter.modifiedAfter),
@@ -42,11 +38,28 @@ function filterPayload(filter: BackupFilterDraft): Record<string, unknown> {
 }
 
 export const repositoryApi = {
-  create(parentPath: string, name: string): Promise<RepositoryInfo> {
-    return invoke("create_repository", { parentPath, name });
+  create(parentPath: string, name: string, encryptionAlgorithm: string, encryptionPassword: string): Promise<RepositoryInfo> {
+    return invoke("create_repository", {
+      parentPath,
+      name,
+      encryptionAlgorithm,
+      encryptionPassword,
+    });
   },
   open(repositoryPath: string): Promise<RepositoryInfo> {
     return invoke("open_repository", { repositoryPath });
+  },
+  rename(repositoryPath: string, displayName: string): Promise<RepositoryInfo> {
+    return invoke("rename_repository", { repositoryPath, displayName });
+  },
+  unlock(repositoryPath: string, encryptionPassword: string): Promise<RepositoryInfo> {
+    return invoke("unlock_repository", { repositoryPath, encryptionPassword });
+  },
+  changePassword(repositoryPath: string, oldPassword: string, newPassword: string): Promise<RepositoryInfo> {
+    return invoke("change_repository_password", { repositoryPath, oldPassword, newPassword });
+  },
+  delete(repositoryPath: string, encryptionPassword?: string): Promise<void> {
+    return invoke("delete_repository", { repositoryPath, encryptionPassword });
   },
   listSnapshots(repositoryPath: string): Promise<SnapshotInfo[]> {
     return invoke("list_snapshots", { repositoryPath });
@@ -56,7 +69,7 @@ export const repositoryApi = {
     sources: string[];
     filter: BackupFilterDraft;
     compressionAlgorithm: string;
-    encryptionAlgorithm: string;
+    encryptSnapshot: boolean;
     encryptionPassword: string;
     snapshotTitle: string;
   }): Promise<BackupResult> {
@@ -65,7 +78,7 @@ export const repositoryApi = {
       destination: args.repositoryPath,
       filter: filterPayload(args.filter),
       compressionAlgorithm: args.compressionAlgorithm,
-      encryptionAlgorithm: args.encryptionAlgorithm,
+      encryptSnapshot: args.encryptSnapshot,
       encryptionPassword: args.encryptionPassword,
       snapshotTitle: args.snapshotTitle.trim(),
     });
@@ -101,8 +114,8 @@ export const repositoryApi = {
       algorithm: "tar",
     });
   },
-  deleteSnapshot(repositoryPath: string, snapshotId: string): Promise<SnapshotDeleteResult> {
-    return invoke("delete_snapshot", { repositoryPath, snapshotId });
+  deleteSnapshot(repositoryPath: string, snapshotId: string, encryptionPassword?: string): Promise<SnapshotDeleteResult> {
+    return invoke("delete_snapshot", { repositoryPath, snapshotId, encryptionPassword });
   },
 };
 

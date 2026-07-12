@@ -137,7 +137,7 @@ repository/
 
 各部分职责：
 
-- `repo.meta`：仓库标识文件，用于判断目录是否为合法 BackupTool repository。
+- `repo.meta`：仓库标识和仓库级元数据文件，用于判断目录是否为合法 BackupTool repository，并记录显示名称、仓库加密算法和密码校验信息。仓库名称是显示名称，不要求与磁盘目录名一致；重命名仓库只修改 `repo.meta`，不移动或改名目录。
 - `objects/`：保存普通文件内容。对象名为原始文件内容的 SHA-256 hash 加存储加密状态后缀：`<content-hash>-plain` 或 `<content-hash>-encrypted`。相同内容且加密状态相同的文件可以复用，明文和密文 object 可以同时存在。
 - `snapshots/`：保存每次备份生成的 snapshot 文件，例如 `<seconds>-<nanoseconds>-<sequence>.snapshot`。
 - `indexes/`：当前已创建，主要为后续索引能力预留。
@@ -168,7 +168,8 @@ backup-tool snapshot v1
 用户选择一个或多个源目录
     -> 源路径规范化和去重
     -> 扫描目录树
-    -> BackupFilter 判断普通文件是否进入备份
+    -> BackupFilter 使用路径正则判断普通文件是否进入备份
+    -> 根据本次 snapshot 是否加密决定 object-id 后缀为 -plain 或 -encrypted
     -> 文件内容写入 objects/
     -> snapshots/<snapshot-id>.snapshot 记录结构、源路径、标题、创建时间和对象引用
     -> 返回 snapshot id、文件数、字节数
@@ -216,9 +217,13 @@ repository.tar
 对应 Tauri command：
 
 ```text
-create_repository(parent_path, name)
+create_repository(parent_path, name, encryption_algorithm?, encryption_password?)
 open_repository(repository_path)
-delete_snapshot(repository_path, snapshot_id)
+rename_repository(repository_path, display_name)
+unlock_repository(repository_path, encryption_password)
+change_repository_password(repository_path, old_password, new_password)
+delete_repository(repository_path, encryption_password?)
+delete_snapshot(repository_path, snapshot_id, encryption_password?)
 export_repository(repository_path, archive_path, algorithm?)
 import_repository(archive_path, destination, algorithm?)
 ```
@@ -232,7 +237,11 @@ import_repository(archive_path, destination, algorithm?)
 ```text
 Repository
 ├── init(root)
+├── init_with_options(root, display_name, encryption_algorithm, encryption_password)
 ├── open(root)
+├── metadata() -> RepositoryMetadata
+├── set_display_name(display_name) -> RepositoryMetadata
+├── verify_encryption_password(password)
 ├── writer() -> RepositoryWriter
 ├── reader() -> RepositoryReader
 ├── export_archive(output_file, ArchiveAlgorithm)
@@ -268,6 +277,11 @@ SnapshotEntry
 ObjectStore
 ├── write_object(bytes) -> ObjectId
 └── read_object(object_id) -> Vec<u8>
+
+RepositoryMetadata
+├── display_name
+├── encryption_algorithm
+└── password verifier metadata
 ```
 
 恢复相关策略：
@@ -281,8 +295,8 @@ RestoreOptions
 
 Tauri DTO 位于 `src-tauri/src/dto.rs`：
 
-- `RepositoryInfoDto`：仓库规范化路径和显示名称。
-- `BackupFilterDto`：前端筛选条件。
+- `RepositoryInfoDto`：仓库规范化路径、显示名称和仓库加密算法。
+- `BackupFilterDto`：前端筛选条件。当前筛选主入口是 `path_regex`，匹配使用 `/` 归一化后的源内相对路径；空正则表示不过滤。
 - `BackupResultDto`：备份结果。
 - `RestoreResultDto`：恢复结果。
 - `SnapshotInfoDto`：snapshot 列表展示数据。
@@ -294,12 +308,13 @@ Tauri DTO 位于 `src-tauri/src/dto.rs`：
 当前 GUI 以 repository 为根组织：
 
 - 左侧仓库侧栏：新建、打开、导入、置顶、归档和切换仓库；侧栏宽度可以拖动调整。
-- 仓库主页：显示仓库信息、添加快照、导出仓库和快照列表。
-- `Add Snapshot` 页面：固定当前仓库，包含多源目录、压缩、加密、标题和高级筛选。
+- 仓库主页：显示仓库信息、设置入口、添加快照、导出仓库和快照列表。
+- Repository Settings：修改仓库显示名称、解锁加密仓库、修改加密仓库密码、删除仓库。删除仓库会从磁盘删除整个 repository 目录；加密仓库删除时必须输入正确密码。
+- `Add Snapshot` 页面：固定当前仓库，包含多源目录、压缩、是否加密本次 snapshot、标题和高级路径正则筛选。加密算法不在这里切换，而是来自仓库创建时写入 `repo.meta` 的仓库配置。
 - `Export Repository` 页面：固定当前仓库，导出为 tar。
-- `Restore Snapshot` 页面：固定当前仓库和 snapshot，只选择恢复目录、路径策略、冲突策略和密码。
+- `Restore Snapshot` 页面：固定当前仓库和 snapshot，只选择恢复目录、路径策略和冲突策略；只有当前 snapshot 含有加密 object 时才显示密码输入框。
 
-GUI 通过 React 组件组织界面，通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；密码只保留在当前页面内存中，不写入 Store 或 repository。
+GUI 通过 React 组件组织界面，通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；加密密码只保存在当前前端进程内存中，不写入 Store 或明文写入 repository。
 
 ## 9. 环境配置
 
@@ -495,12 +510,24 @@ just test 通过
 - `none`：默认值，不压缩 payload。
 - `zstd`：使用 zstd 压缩 payload。
 
-当前加密能力同样作用于单个 object 的 payload，而不是整个仓库目录或 tar 包。备份时可以选择加密算法：
+当前加密能力同样作用于单个 object 的 payload，而不是整个仓库目录或 tar 包。仓库创建时选择仓库加密算法；每次添加 snapshot 时只选择本次 snapshot 是否加密：
 
 - `none`：默认值，不加密 payload。
 - `aes-256-gcm`：使用 AES-256-GCM 加密 payload，并提供认证校验。
 
-用户通过密码启用加密。core 使用 Argon2id 和随机 salt 从密码派生 256-bit key，object header 中只保存算法、KDF、salt 和 nonce，不保存明文密码或派生 key。
+用户通过密码启用 AES-256-GCM。当前实现使用信封加密：
+
+```text
+用户密码
+    -> Argon2id(password, salt)
+    -> KEK
+    -> 解包 repository_master_key
+    -> repository_master_key 加密/解密 object payload
+```
+
+`repo.meta` 保存仓库显示名称、仓库加密算法、密钥格式版本、KDF 信息、salt、master-key wrapping algorithm、wrapping nonce、wrapped repository master key 和 key id。它不保存明文密码、KEK 或明文 repository master key。
+
+修改仓库密码时只重新包装同一个 `repository_master_key`：不重写 object，不修改 object id，不重写 snapshot。旧密码错误时修改失败；新密码生效后旧密码不能再解包 master key。
 
 `content-hash` 始终由原始文件内容计算，不由 object header、压缩后的 payload、加密后的 payload、salt 或 nonce 计算。当前实现使用 SHA-256，得到 64 字符小写十六进制 hash。
 
@@ -511,7 +538,7 @@ just test 通过
 <content-hash>-encrypted
 ```
 
-因此，相同内容的未加密 object 和加密 object 可以同时存在，不会因后续备份改变旧 snapshot 是否需要密码。相同原始内容且具有相同加密状态的文件仍映射到同一个 object，实现内容去重。压缩算法不进入 object id。
+因此，相同内容的未加密 object 和加密 object 可以同时存在，不会因后续备份改变旧 snapshot 是否需要密码。相同原始内容且具有相同加密状态的文件仍映射到同一个 object，实现内容去重；例如两个相同内容的文件都选择加密时会共享同一个 `<content-hash>-encrypted` object。压缩算法不进入 object id。
 
 object 物理路径统一为：
 
@@ -525,8 +552,7 @@ object 文件内部使用文本 header + 二进制 payload：
 backup-tool object v1
 compression    none|zstd
 encryption     none|aes-256-gcm
-kdf            none|argon2id
-salt           <hex>
+key_id         <repository key id>
 nonce          <hex>
 original_size  <u64>
 payload_size   <u64>
@@ -552,7 +578,7 @@ object payload
     -> 原始文件内容
 ```
 
-若同一 `object-id` 已存在但 compression 与本次备份选择不同，会根据本次参数重写该加密状态下的 object。明文与密文使用不同 object id，彼此不会覆盖。对于已存在的加密 object，写入时会使用本次密码验证其内容；密码不匹配时返回明确错误，不会覆盖旧 object。
+若同一 `object-id` 已存在但 compression 与本次备份选择不同，会根据本次参数重写该加密状态下的 object。明文与密文使用不同 object id，彼此不会覆盖。对于已存在的加密 object，写入时会先用用户密码解包仓库 master key，再验证其内容；密码不匹配时返回明确错误，不会覆盖旧 object。
 
 恢复流程中用户不需要选择压缩算法或加密算法，算法从 object header 读取；如果 object 已加密，则必须提供正确密码：
 
@@ -561,7 +587,7 @@ snapshot entry
     -> object_id
     -> ObjectStore 读取 objects/<object-id>
     -> 解析 object header 中的 encryption 和 compression
-    -> 如果是 aes-256-gcm 则用密码解密 payload
+    -> 如果是 aes-256-gcm 则先用密码解包 repository_master_key，再解密 payload
     -> 如果是 zstd 则解压 payload
     -> 写回原始文件内容
 ```

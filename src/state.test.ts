@@ -10,13 +10,17 @@ import {
   visibleUnpinnedRepositories,
 } from "./state";
 
+function repository(path: string, name: string) {
+  return { path, name, encryptionAlgorithm: "none" as const };
+}
+
 describe("repository UI state", () => {
   it("deduplicates canonical Windows paths and unarchives reopened repositories", () => {
     const state = createState();
-    const first = upsertRepository(state, { path: "C:\\Backups\\Repo", name: "Repo" });
+    const first = upsertRepository(state, repository("C:\\Backups\\Repo", "Repo"));
     first.archived = true;
 
-    const reopened = upsertRepository(state, { path: "c:\\backups\\repo", name: "Repo" });
+    const reopened = upsertRepository(state, repository("c:\\backups\\repo", "Repo"));
 
     expect(state.repositories).toHaveLength(1);
     expect(reopened.archived).toBe(false);
@@ -25,9 +29,9 @@ describe("repository UI state", () => {
 
   it("separates pinned repositories from the regular repository list", () => {
     const state = createState();
-    const older = upsertRepository(state, { path: "C:\\older", name: "Older" });
+    const older = upsertRepository(state, repository("C:\\older", "Older"));
     older.lastOpenedAt = 10;
-    const newer = upsertRepository(state, { path: "C:\\newer", name: "Newer" });
+    const newer = upsertRepository(state, repository("C:\\newer", "Newer"));
     newer.lastOpenedAt = 20;
     setRepositoryPinned(state, older.path, true);
 
@@ -37,9 +41,9 @@ describe("repository UI state", () => {
 
   it("keeps explicit repository order after drag reordering", () => {
     const state = createState();
-    const first = upsertRepository(state, { path: "C:\\first", name: "First" });
-    const second = upsertRepository(state, { path: "C:\\second", name: "Second" });
-    const third = upsertRepository(state, { path: "C:\\third", name: "Third" });
+    const first = upsertRepository(state, repository("C:\\first", "First"));
+    const second = upsertRepository(state, repository("C:\\second", "Second"));
+    const third = upsertRepository(state, repository("C:\\third", "Third"));
 
     reorderRepositories(state, false, [third.path, first.path, second.path]);
 

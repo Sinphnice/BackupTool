@@ -6,10 +6,11 @@
   --sidebar-width: 260px;
   --sidebar-resizer-width: 10px;
   --sidebar-resizer-line-width: 1px;
-  --titlebar-height: 34px;
+  --titlebar-height: 40px;
   --bg: #FFFFFF;
   --fg: #0D0D0D;
   --accent: #0169CC;
+  --error: #C62828;
   --sidebar-base: color-mix(in srgb, var(--bg), var(--fg) 5%);
   --sidebar-hover: color-mix(in srgb, var(--bg), var(--fg) 10%);
   --sidebar-active: color-mix(in srgb, var(--bg), var(--accent) 10%);
@@ -27,7 +28,6 @@
   --danger-hover: color-mix(in srgb, var(--bg), var(--danger) 10%);
   --success: color-mix(in srgb, var(--accent), var(--fg) 25%);
   --warning: color-mix(in srgb, var(--fg), var(--accent) 20%);
-  --error: color-mix(in srgb, var(--fg), var(--accent) 45%);
 }
 
 * {
@@ -83,22 +83,32 @@ button {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: stretch;
   color: var(--fg);
-  background: var(--bg);
+  background: var(--surface-soft);
 }
 
 .titlebar-leading,
 .titlebar-window-controls {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0px;
 }
 
 .titlebar-leading {
-  padding-left: 8px;
+  align-items: flex-start;
+  padding-left: 6px;
+  padding-top: 6px;
 }
 
 .titlebar-window-controls {
-  padding-right: 6px;
+  gap: 0;
+  align-items: stretch;
+}
+
+.titlebar-window-button.icon-button {
+  height: 100%;
+  width: 46px;
+  min-width: 46px;
+  border-radius: 0;
 }
 
 .titlebar-drag-region {
@@ -109,26 +119,47 @@ button {
 .titlebar-sidebar-toggle,
 .titlebar-window-button {
   --icon-button-size: 16px;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
-  border-radius: 5px;
   color: var(--icon-muted);
 }
 
+.titlebar-sidebar-toggle {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border-radius: 5px;
+}
+
+.titlebar-window-button {
+  height: 100%;
+  min-height: 100%;
+  border-radius: 0;
+}
+
+.titlebar-maximize-button {
+  --titlebar-window-icon-size: 12px;
+}
+
+.titlebar-restore-button {
+  --titlebar-window-icon-size: 12px;
+}
+
 .titlebar-sidebar-toggle:hover,
-.titlebar-sidebar-toggle:focus-visible,
+.titlebar-sidebar-toggle:focus-visible {
+  color: var(--fg);
+  background: var(--sidebar-hover);
+}
+
 .titlebar-window-button:hover,
 .titlebar-window-button:focus-visible {
   color: var(--fg);
-  background: var(--surface-soft);
+  background: var(--sidebar-hover);
 }
 
 .titlebar-close-button:hover,
 .titlebar-close-button:focus-visible {
   color: var(--bg);
-  background: var(--error);
+  background: #C42B1C;
 }
 
 #app-content {
@@ -498,19 +529,36 @@ button {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
 }
 
-.action-panel-heading svg {
+.action-panel-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.action-panel-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.action-panel-title svg {
   color: var(--text-muted);
   stroke: currentColor;
 }
 
 .action-panel-heading h1 {
+  overflow: hidden;
   margin: 0;
   color: var(--fg);
   font-size: 22px;
   font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .eyebrow {
@@ -647,7 +695,6 @@ button {
 .icon-button:focus-visible {
   outline: 2px solid transparent;
   color: var(--fg);
-  background: transparent;
 }
 
 .icon-button svg {
@@ -655,6 +702,19 @@ button {
   width: var(--icon-button-size, 16px);
   height: var(--icon-button-size, 16px);
   stroke: currentColor;
+}
+
+.titlebar-sidebar-toggle.icon-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border-radius: 5px;
+}
+
+.titlebar-window-button.icon-button svg {
+  width: var(--titlebar-window-icon-size, var(--icon-button-size, 16px));
+  height: var(--titlebar-window-icon-size, var(--icon-button-size, 16px));
 }
 
 .icon-button.is-danger {
@@ -742,6 +802,12 @@ select:disabled {
 .refresh-button:focus-visible {
   outline: 2px solid transparent;
   background: var(--surface-soft);
+}
+
+.settings-button {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
 }
 
 .refresh-icon {
@@ -1069,6 +1135,54 @@ select.is-invalid,
 
 .advanced-panel .form-grid {
   padding: 6px 14px 16px;
+}
+
+.danger-zone {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.unlock-zone,
+.password-zone {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.password-zone h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.danger-zone h2 {
+  margin: 0;
+  color: var(--error);
+  font-size: 14px;
+}
+
+.confirm-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--bg), var(--error) 30%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg), var(--error) 5%);
+}
+
+.confirm-panel p {
+  margin: 0;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.danger-copy {
+  margin: 0;
+  color: var(--error);
+  font-size: 12px;
 }
 
 .snapshot-summary {

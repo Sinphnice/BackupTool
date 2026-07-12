@@ -1,6 +1,7 @@
 export type RepositoryInfo = {
   path: string;
   name: string;
+  encryptionAlgorithm: "none" | "aes-256-gcm";
 };
 
 export type RepositoryRecord = RepositoryInfo & {
@@ -23,14 +24,11 @@ export type SnapshotInfo = {
   createdNanoseconds?: number;
   sequence?: number;
   title?: string;
+  hasEncryptedObjects: boolean;
 };
 
 export type BackupFilterDraft = {
-  includePath: string;
-  excludePath: string;
-  extensions: string;
-  includeName: string;
-  excludeName: string;
+  pathRegex: string;
   minSize: string;
   maxSize: string;
   modifiedAfter: string;
@@ -47,7 +45,7 @@ export type RepositoryWorkspace = {
   route: WorkspaceRoute;
   sourcePaths: string[];
   compressionAlgorithm: "none" | "zstd";
-  encryptionAlgorithm: "none" | "aes-256-gcm";
+  encryptSnapshot: boolean;
   snapshotTitle: string;
   filtersOpen: boolean;
   filter: BackupFilterDraft;

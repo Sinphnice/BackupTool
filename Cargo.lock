@@ -137,6 +137,7 @@ dependencies = [
  "argon2",
  "hex",
  "rand",
+ "regex",
  "sha2",
  "tar",
  "zstd",

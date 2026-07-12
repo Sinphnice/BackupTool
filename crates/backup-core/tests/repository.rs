@@ -4,7 +4,7 @@ use backup_core::{
     RestoreStrategy, SnapshotId,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -479,7 +479,7 @@ fn repository_backup_applies_filter_before_storing_objects() {
         .backup(
             &source,
             &BackupFilter {
-                extensions: vec!["txt".to_string()],
+                path_regex: Some(r"\.txt$".to_string()),
                 ..BackupFilter::default()
             },
         )
@@ -579,7 +579,7 @@ fn delete_snapshot_treats_plain_and_encrypted_objects_as_distinct_references() {
     fs::write(plain_source.join("plain.txt"), "same content").unwrap();
     fs::write(encrypted_source.join("encrypted.txt"), "same content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let plain = repository
         .writer()
         .backup(&plain_source, &BackupFilter::default())
@@ -599,7 +599,10 @@ fn delete_snapshot_treats_plain_and_encrypted_objects_as_distinct_references() {
     let plain_object = first_file_object_id(&repository, &plain.id);
     let encrypted_object = first_file_object_id(&repository, &encrypted.id);
 
-    let result = repository.writer().delete_snapshot(&encrypted.id).unwrap();
+    let result = repository
+        .writer()
+        .delete_snapshot_with_password(&encrypted.id, Some("password"))
+        .unwrap();
 
     assert_eq!(result.deleted_object_count, 1);
     assert!(repository_path
@@ -625,7 +628,7 @@ fn delete_snapshot_validates_other_snapshots_before_mutating_repository() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "first content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "correct horse battery staple");
     let first = repository
         .writer()
         .backup(&source, &BackupFilter::default())
@@ -664,7 +667,7 @@ fn delete_snapshot_reports_object_cleanup_failures_as_warnings() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "cleanup warning").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let snapshot = repository
         .writer()
         .backup(&source, &BackupFilter::default())
@@ -817,6 +820,16 @@ impl Drop for TestDir {
     }
 }
 
+fn encrypted_repository(path: impl AsRef<Path>, password: &str) -> Repository {
+    Repository::init_with_options(
+        path.as_ref(),
+        None,
+        EncryptionAlgorithm::Aes256Gcm,
+        Some(password.to_string()),
+    )
+    .unwrap()
+}
+
 trait SnapshotDoesNotExistExt {
     fn is_snapshot_missing(&self) -> bool;
 }
@@ -839,7 +852,7 @@ fn repository_exports_and_imports_tar_archive() {
     fs::write(source.join("docs").join("a.txt"), "alpha").unwrap();
     fs::write(source.join("b.txt"), "beta").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let snapshot = repository
         .writer()
         .backup(&source, &BackupFilter::default())
@@ -879,7 +892,7 @@ fn zstd_backup_stores_compressed_object_and_restores_original_content() {
     fs::write(source.join("binary.bin"), [0_u8, 1, 2, 3, 255]).unwrap();
     fs::write(source.join("empty.txt"), []).unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "correct horse battery staple");
     let snapshot = repository
         .writer()
         .backup_with_options(
@@ -1011,7 +1024,7 @@ fn aes_encrypted_backup_restores_with_password() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("secret.txt"), "very secret content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "correct horse battery staple");
     let snapshot = repository
         .writer()
         .backup_with_options(
@@ -1030,8 +1043,7 @@ fn aes_encrypted_backup_restores_with_password() {
     let object_text = String::from_utf8_lossy(&object_bytes);
     let header = object_header_text(&object_path);
     assert!(header.contains("encryption\taes-256-gcm"));
-    assert!(header.contains("kdf\targon2id"));
-    assert!(header.contains("salt\t"));
+    assert!(header.contains("key_id\t"));
     assert!(header.contains("nonce\t"));
     assert!(!object_text.contains("very secret content"));
 
@@ -1061,7 +1073,7 @@ fn encrypted_restore_requires_correct_password() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("secret.txt"), "secret").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "right-password");
     let snapshot = repository
         .writer()
         .backup_with_options(
@@ -1096,7 +1108,113 @@ fn encrypted_restore_requires_correct_password() {
         .unwrap_err();
     assert!(wrong
         .to_string()
-        .contains("failed to decrypt object payload"));
+        .contains("failed to unlock repository"));
+}
+
+#[test]
+fn encrypted_repository_can_reopen_and_unlock_master_key() {
+    let root = TestDir::new("repo_reopen_unlock_master_key");
+    let repository_path = root.path.join("repository");
+    encrypted_repository(&repository_path, "password");
+
+    let reopened = Repository::open(&repository_path).unwrap();
+    reopened.verify_encryption_password(Some("password")).unwrap();
+    let error = reopened
+        .verify_encryption_password(Some("wrong-password"))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to unlock repository"));
+}
+
+#[test]
+fn change_repository_password_rewraps_master_key_without_rewriting_objects() {
+    let root = TestDir::new("repo_change_password");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("secret.txt"), "secret").unwrap();
+
+    let repository = encrypted_repository(&repository_path, "old-password");
+    let snapshot = repository
+        .writer()
+        .backup_with_options(
+            &source,
+            &BackupFilter::default(),
+            BackupOptions {
+                encryption_algorithm: EncryptionAlgorithm::Aes256Gcm,
+                encryption_password: Some("old-password".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    let object_path = repository_path.join("objects").join(object_id.as_str());
+    let object_before = fs::read(&object_path).unwrap();
+
+    repository
+        .change_encryption_password("old-password", "new-password")
+        .unwrap();
+
+    assert!(repository
+        .verify_encryption_password(Some("old-password"))
+        .is_err());
+    repository
+        .verify_encryption_password(Some("new-password"))
+        .unwrap();
+    assert_eq!(fs::read(&object_path).unwrap(), object_before);
+    assert_eq!(first_file_object_id(&repository, &snapshot.id), object_id);
+    repository
+        .reader()
+        .restore_with_options(
+            &snapshot.id,
+            &restore,
+            RestoreOptions {
+                decryption_password: Some("new-password".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(restore.join("secret.txt")).unwrap(),
+        "secret"
+    );
+}
+
+#[test]
+fn failed_password_change_keeps_old_password_valid() {
+    let root = TestDir::new("repo_change_password_failure");
+    let repository_path = root.path.join("repository");
+    let repository = encrypted_repository(&repository_path, "old-password");
+    fs::create_dir(repository_path.join("repo.meta.tmp")).unwrap();
+
+    repository
+        .change_encryption_password("old-password", "new-password")
+        .unwrap_err();
+
+    repository
+        .verify_encryption_password(Some("old-password"))
+        .unwrap();
+}
+
+#[test]
+fn old_repository_metadata_format_returns_controlled_error() {
+    let root = TestDir::new("repo_old_metadata_rejected");
+    let repository_path = root.path.join("repository");
+    fs::create_dir_all(repository_path.join("objects")).unwrap();
+    fs::create_dir_all(repository_path.join("snapshots")).unwrap();
+    fs::create_dir_all(repository_path.join("indexes")).unwrap();
+    fs::write(
+        repository_path.join("repo.meta"),
+        "backup-tool repository v1\ndisplay_name\told\nencryption\tnone\n",
+    )
+    .unwrap();
+
+    let error = Repository::open(&repository_path).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("old repositories are not supported"));
 }
 
 #[test]
@@ -1111,7 +1229,7 @@ fn plain_and_encrypted_variants_of_same_content_coexist() {
     fs::write(plain_source.join("plain.txt"), "shared content").unwrap();
     fs::write(encrypted_source.join("secret.txt"), "shared content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let plain_snapshot = repository
         .writer()
         .backup(&plain_source, &BackupFilter::default())
@@ -1170,7 +1288,7 @@ fn encrypted_files_with_same_content_share_one_object() {
     fs::write(first_source.join("first.txt"), "shared encrypted content").unwrap();
     fs::write(second_source.join("second.txt"), "shared encrypted content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let snapshot = repository
         .writer()
         .backup_many_with_options(
@@ -1214,7 +1332,7 @@ fn encrypted_object_rejects_a_different_password_without_overwriting() {
     fs::write(first_source.join("first.txt"), "shared encrypted content").unwrap();
     fs::write(second_source.join("second.txt"), "shared encrypted content").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "first-password");
     let first_snapshot = repository
         .writer()
         .backup_with_options(
@@ -1241,7 +1359,7 @@ fn encrypted_object_rejects_a_different_password_without_overwriting() {
         .unwrap_err();
     assert!(error
         .to_string()
-        .contains("failed to decrypt object payload"));
+        .contains("failed to unlock repository"));
 
     repository
         .reader()
@@ -1269,7 +1387,7 @@ fn zstd_and_aes_encrypted_backup_restores_original_content() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "compressed and encrypted text").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let snapshot = repository
         .writer()
         .backup_with_options(
@@ -1320,7 +1438,7 @@ fn object_id_uses_content_hash_and_encryption_state() {
         .unwrap();
     let plain_object = first_file_object_id(&plain_repository, &plain_snapshot.id);
 
-    let encrypted_repository = Repository::init(root.path.join("encrypted_repository")).unwrap();
+    let encrypted_repository = encrypted_repository(root.path.join("encrypted_repository"), "password");
     let encrypted_snapshot = encrypted_repository
         .writer()
         .backup_with_options(
@@ -1356,7 +1474,7 @@ fn tar_export_import_preserves_encrypted_objects() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "encrypted archive text").unwrap();
 
-    let repository = Repository::init(&repository_path).unwrap();
+    let repository = encrypted_repository(&repository_path, "password");
     let snapshot = repository
         .writer()
         .backup_with_options(
@@ -1611,7 +1729,7 @@ fn object_payload_size_mismatch_returns_error() {
     let object_id = first_file_object_id(&repository, &snapshot.id);
     fs::write(
         repository_path.join("objects").join(object_id.as_str()),
-        "backup-tool object v1\ncompression\tnone\noriginal_size\t5\npayload_size\t99\n\nalpha",
+        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\noriginal_size\t5\npayload_size\t99\n\nalpha",
     )
     .unwrap();
 
@@ -1640,7 +1758,7 @@ fn object_original_size_mismatch_returns_error() {
     let object_id = first_file_object_id(&repository, &snapshot.id);
     fs::write(
         repository_path.join("objects").join(object_id.as_str()),
-        "backup-tool object v1\ncompression\tnone\noriginal_size\t99\npayload_size\t5\n\nalpha",
+        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\noriginal_size\t99\npayload_size\t5\n\nalpha",
     )
     .unwrap();
 

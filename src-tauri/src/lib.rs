@@ -11,12 +11,16 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::backup,
+            commands::change_repository_password,
             commands::create_repository,
+            commands::delete_repository,
             commands::delete_snapshot,
             commands::export_repository,
             commands::import_repository,
             commands::list_snapshots,
             commands::open_repository,
+            commands::rename_repository,
+            commands::unlock_repository,
             commands::restore
         ])
         .run(tauri::generate_context!())

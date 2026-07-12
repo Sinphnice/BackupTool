@@ -15,11 +15,7 @@ let saveTimer: number | undefined;
 
 function blankFilter() {
   return {
-    includePath: "",
-    excludePath: "",
-    extensions: "",
-    includeName: "",
-    excludeName: "",
+    pathRegex: "",
     minSize: "",
     maxSize: "",
     modifiedAfter: "",
@@ -32,7 +28,7 @@ export function createWorkspace(): RepositoryWorkspace {
     route: { kind: "overview" },
     sourcePaths: [],
     compressionAlgorithm: "none",
-    encryptionAlgorithm: "none",
+    encryptSnapshot: false,
     snapshotTitle: "",
     filtersOpen: false,
     filter: blankFilter(),
@@ -81,7 +77,6 @@ function workspaceValue(value: unknown): RepositoryWorkspace {
   if (!isObject(value)) return fallback;
   const filter = isObject(value.filter) ? value.filter : {};
   const compression = value.compressionAlgorithm === "zstd" ? "zstd" : "none";
-  const encryption = value.encryptionAlgorithm === "aes-256-gcm" ? "aes-256-gcm" : "none";
   const pathStrategy =
     value.restorePathStrategy === "preserveFullPath" || value.restorePathStrategy === "flatten"
       ? value.restorePathStrategy
@@ -97,15 +92,11 @@ function workspaceValue(value: unknown): RepositoryWorkspace {
       ? value.sourcePaths.filter((item): item is string => typeof item === "string")
       : [],
     compressionAlgorithm: compression,
-    encryptionAlgorithm: encryption,
+    encryptSnapshot: value.encryptSnapshot === true,
     snapshotTitle: stringValue(value.snapshotTitle),
     filtersOpen: value.filtersOpen === true,
     filter: {
-      includePath: stringValue(filter.includePath),
-      excludePath: stringValue(filter.excludePath),
-      extensions: stringValue(filter.extensions),
-      includeName: stringValue(filter.includeName),
-      excludeName: stringValue(filter.excludeName),
+      pathRegex: stringValue(filter.pathRegex),
       minSize: stringValue(filter.minSize),
       maxSize: stringValue(filter.maxSize),
       modifiedAfter: stringValue(filter.modifiedAfter),
@@ -129,6 +120,7 @@ function sanitizeState(value: unknown): AppState {
           {
             path: item.path,
             name: item.name,
+            encryptionAlgorithm: item.encryptionAlgorithm === "aes-256-gcm" ? "aes-256-gcm" : "none",
             pinned: item.pinned === true,
             archived: item.archived === true,
             lastOpenedAt:

@@ -1,4 +1,4 @@
-﻿# BackupTool 后续开发计划
+# BackupTool 后续开发计划
 
 本文记录项目迁移为纯 Rust 后端后的开发路线。环境配置、依赖安装和构建命令见 [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)；本文只描述功能开发顺序、架构边界、接口方向和验收标准。
 

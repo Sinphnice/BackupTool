@@ -1,6 +1,7 @@
 use crate::commands::{
-    backup, create_repository, delete_snapshot, export_repository, import_repository,
-    list_snapshots, open_repository, restore,
+    backup, change_repository_password, create_repository, delete_repository, delete_snapshot,
+    export_repository, import_repository, list_snapshots, open_repository, rename_repository, restore,
+    unlock_repository,
 };
 use crate::dto::{BackupFilterDto, FlattenConflictStrategyDto, RestorePathStrategyDto};
 use std::fs;
@@ -13,6 +14,8 @@ fn create_and_open_repository_return_canonical_repository_info() {
     let created = create_repository(
         root.path.to_string_lossy().into_owned(),
         "Project Backup".to_string(),
+        None,
+        None,
     )
     .unwrap();
 
@@ -33,21 +36,85 @@ fn create_repository_rejects_invalid_names_and_existing_targets() {
 
     for name in ["", "..", "bad/name", "CON", "trailing."] {
         assert!(
-            create_repository(root.path.to_string_lossy().into_owned(), name.to_string()).is_err()
+            create_repository(
+                root.path.to_string_lossy().into_owned(),
+                name.to_string(),
+                None,
+                None
+            )
+            .is_err()
         );
     }
 
     create_repository(
         root.path.to_string_lossy().into_owned(),
         "existing".to_string(),
+        None,
+        None,
     )
     .unwrap();
     let error = create_repository(
         root.path.to_string_lossy().into_owned(),
         "existing".to_string(),
+        None,
+        None,
     )
     .unwrap_err();
     assert!(error.contains("already exists"));
+}
+
+#[test]
+fn rename_repository_updates_display_name_without_renaming_directory() {
+    let root = TestDir::new("tauri_rename_repository");
+    let created = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "physical-name".to_string(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let renamed = rename_repository(created.path.clone(), "Display Name".to_string()).unwrap();
+
+    assert_eq!(renamed.name, "Display Name");
+    assert_eq!(renamed.path, created.path);
+    assert!(std::path::Path::new(&created.path).exists());
+}
+
+#[test]
+fn encrypted_repository_can_be_unlocked_after_reopen() {
+    let root = TestDir::new("tauri_unlock_repository");
+    let created = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "encrypted".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+
+    let opened = open_repository(created.path.clone()).unwrap();
+    assert_eq!(opened.encryption_algorithm, "aes-256-gcm");
+    assert!(unlock_repository(created.path.clone(), "wrong".to_string()).is_err());
+    let unlocked = unlock_repository(created.path, "password".to_string()).unwrap();
+    assert_eq!(unlocked.name, "encrypted");
+}
+
+#[test]
+fn delete_repository_removes_valid_repository_and_rejects_non_repository() {
+    let root = TestDir::new("tauri_delete_repository");
+    let created = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        None,
+        None,
+    )
+    .unwrap();
+    let non_repository = root.path.join("plain-dir");
+    fs::create_dir_all(&non_repository).unwrap();
+
+    assert!(delete_repository(non_repository.to_string_lossy().into_owned(), None).is_err());
+    delete_repository(created.path.clone(), None).unwrap();
+    assert!(!std::path::Path::new(&created.path).exists());
 }
 
 #[test]
@@ -100,7 +167,7 @@ fn backup_and_restore_round_trip_regular_files() {
 }
 
 #[test]
-fn backup_applies_extension_filter() {
+fn backup_applies_path_regex_filter() {
     let root = TestDir::new("tauri_filter");
     let source = root.path.join("source");
     let repository_dir = root.path.join("repository");
@@ -113,11 +180,7 @@ fn backup_applies_extension_filter() {
         vec![source.to_string_lossy().into_owned()],
         repository_dir.to_string_lossy().into_owned(),
         Some(BackupFilterDto {
-            include_path_contains: None,
-            exclude_path_contains: None,
-            extensions: Some("txt".to_string()),
-            include_name_contains: None,
-            exclude_name_contains: None,
+            path_regex: Some(r"\.txt$".to_string()),
             min_size: None,
             max_size: None,
             modified_after: None,
@@ -208,6 +271,7 @@ fn delete_snapshot_command_returns_cleanup_summary() {
     let result = delete_snapshot(
         repository_dir.to_string_lossy().into_owned(),
         snapshot.snapshot_id.clone(),
+        None,
     )
     .unwrap();
 
@@ -407,6 +471,13 @@ fn backup_command_accepts_aes_encryption_and_restore_decrypts() {
     let restore_dir = root.path.join("restore");
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "secret text").unwrap();
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
 
     let backup_result = backup(
         vec![source.to_string_lossy().into_owned()],
@@ -414,7 +485,7 @@ fn backup_command_accepts_aes_encryption_and_restore_decrypts() {
         None,
         None,
         None,
-        Some("aes-256-gcm".to_string()),
+        Some(true),
         Some("password".to_string()),
     )
     .unwrap();
@@ -445,24 +516,19 @@ fn backup_command_accepts_aes_encryption_and_restore_decrypts() {
 
 #[test]
 fn backup_command_rejects_invalid_encryption_options() {
-    let missing_password = backup(
-        vec!["unused".to_string()],
-        "unused".to_string(),
-        None,
-        None,
-        None,
+    let root = TestDir::new("tauri_invalid_repository_encryption");
+    let missing_password = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "missing-password".to_string(),
         Some("aes-256-gcm".to_string()),
         None,
     )
     .unwrap_err();
     assert!(missing_password.contains("encryption password must not be empty"));
 
-    let unknown_algorithm = backup(
-        vec!["unused".to_string()],
-        "unused".to_string(),
-        None,
-        None,
-        None,
+    let unknown_algorithm = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "unknown-algorithm".to_string(),
         Some("rot13".to_string()),
         Some("password".to_string()),
     )
@@ -477,6 +543,13 @@ fn restore_command_rejects_missing_or_wrong_decryption_password() {
     let repository_dir = root.path.join("repository");
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("a.txt"), "secret text").unwrap();
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
 
     let backup_result = backup(
         vec![source.to_string_lossy().into_owned()],
@@ -484,7 +557,7 @@ fn restore_command_rejects_missing_or_wrong_decryption_password() {
         None,
         None,
         None,
-        Some("aes-256-gcm".to_string()),
+        Some(true),
         Some("password".to_string()),
     )
     .unwrap();
@@ -509,7 +582,140 @@ fn restore_command_rejects_missing_or_wrong_decryption_password() {
         Some("wrong".to_string()),
     )
     .unwrap_err();
-    assert!(wrong_password.contains("failed to decrypt object payload"));
+    assert!(wrong_password.contains("failed to unlock repository"));
+}
+
+#[test]
+fn change_repository_password_command_rewraps_key() {
+    let root = TestDir::new("tauri_change_repository_password");
+    let source = root.path.join("source");
+    let repository_dir = root.path.join("repository");
+    let restore_dir = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "secret text").unwrap();
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("old-password".to_string()),
+    )
+    .unwrap();
+    let backup_result = backup(
+        vec![source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(true),
+        Some("old-password".to_string()),
+    )
+    .unwrap();
+
+    change_repository_password(
+        repository_dir.to_string_lossy().into_owned(),
+        "old-password".to_string(),
+        "new-password".to_string(),
+    )
+    .unwrap();
+
+    assert!(unlock_repository(
+        repository_dir.to_string_lossy().into_owned(),
+        "old-password".to_string(),
+    )
+    .is_err());
+    unlock_repository(
+        repository_dir.to_string_lossy().into_owned(),
+        "new-password".to_string(),
+    )
+    .unwrap();
+    restore(
+        repository_dir.to_string_lossy().into_owned(),
+        backup_result.snapshot_id,
+        restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        Some("new-password".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(restore_dir.join("a.txt")).unwrap(),
+        "secret text"
+    );
+}
+
+#[test]
+fn delete_encrypted_snapshot_requires_password_but_plain_snapshot_does_not() {
+    let root = TestDir::new("tauri_delete_encrypted_snapshot");
+    let plain_source = root.path.join("plain");
+    let encrypted_source = root.path.join("encrypted");
+    let repository_dir = root.path.join("repository");
+    fs::create_dir_all(&plain_source).unwrap();
+    fs::create_dir_all(&encrypted_source).unwrap();
+    fs::write(plain_source.join("plain.txt"), "plain").unwrap();
+    fs::write(encrypted_source.join("secret.txt"), "secret").unwrap();
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+    let plain = backup(
+        vec![plain_source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+    )
+    .unwrap();
+    let encrypted = backup(
+        vec![encrypted_source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(true),
+        Some("password".to_string()),
+    )
+    .unwrap();
+
+    delete_snapshot(
+        repository_dir.to_string_lossy().into_owned(),
+        plain.snapshot_id,
+        None,
+    )
+    .unwrap();
+    assert!(delete_snapshot(
+        repository_dir.to_string_lossy().into_owned(),
+        encrypted.snapshot_id.clone(),
+        Some("wrong".to_string()),
+    )
+    .is_err());
+    delete_snapshot(
+        repository_dir.to_string_lossy().into_owned(),
+        encrypted.snapshot_id,
+        Some("password".to_string()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn delete_encrypted_repository_requires_password() {
+    let root = TestDir::new("tauri_delete_encrypted_repository");
+    let created = create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+
+    assert!(delete_repository(created.path.clone(), Some("wrong".to_string())).is_err());
+    assert!(std::path::Path::new(&created.path).exists());
+    delete_repository(created.path.clone(), Some("password".to_string())).unwrap();
+    assert!(!std::path::Path::new(&created.path).exists());
 }
 
 #[test]

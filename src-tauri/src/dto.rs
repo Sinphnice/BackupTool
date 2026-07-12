@@ -1,4 +1,4 @@
-use backup_core::{split_filter_list, BackupFilter, FlattenConflictStrategy, RestorePathStrategy};
+use backup_core::{BackupFilter, FlattenConflictStrategy, RestorePathStrategy};
 use serde::{Deserialize, Serialize};
 
 /// 从 TypeScript 接收的筛选条件载荷。
@@ -7,11 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupFilterDto {
-    pub(crate) include_path_contains: Option<String>,
-    pub(crate) exclude_path_contains: Option<String>,
-    pub(crate) extensions: Option<String>,
-    pub(crate) include_name_contains: Option<String>,
-    pub(crate) exclude_name_contains: Option<String>,
+    pub(crate) path_regex: Option<String>,
     pub(crate) min_size: Option<u64>,
     pub(crate) max_size: Option<u64>,
     pub(crate) modified_after: Option<i64>,
@@ -50,6 +46,7 @@ pub(crate) struct ArchiveResultDto {
 pub(crate) struct RepositoryInfoDto {
     pub(crate) path: String,
     pub(crate) name: String,
+    pub(crate) encryption_algorithm: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +69,7 @@ pub(crate) struct SnapshotInfoDto {
     pub(crate) created_nanoseconds: Option<u32>,
     pub(crate) sequence: Option<u16>,
     pub(crate) title: Option<String>,
+    pub(crate) has_encrypted_objects: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +120,7 @@ impl From<backup_core::SnapshotInfo> for SnapshotInfoDto {
             created_nanoseconds: value.created_nanoseconds,
             sequence: value.sequence,
             title: value.title,
+            has_encrypted_objects: value.has_encrypted_objects,
         }
     }
 }
@@ -152,11 +151,7 @@ impl From<backup_core::SnapshotDeleteResult> for SnapshotDeleteResultDto {
 impl From<BackupFilterDto> for BackupFilter {
     fn from(value: BackupFilterDto) -> Self {
         Self {
-            include_path_contains: split_filter_list(value.include_path_contains),
-            exclude_path_contains: split_filter_list(value.exclude_path_contains),
-            extensions: split_filter_list(value.extensions),
-            include_name_contains: split_filter_list(value.include_name_contains),
-            exclude_name_contains: split_filter_list(value.exclude_name_contains),
+            path_regex: value.path_regex,
             min_size: value.min_size,
             max_size: value.max_size,
             modified_after: value.modified_after,

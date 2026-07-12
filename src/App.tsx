@@ -3,16 +3,19 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Archive,
   ChevronRight,
+  Copy,
   Folder,
   Plus,
   FolderOpen,
   Download,
-  Maximize2,
   Minus,
-  PanelLeftClose,
-  PanelLeftOpen,
+  PanelLeft,
+  PanelLeftDashed,
   Pin,
   PinOff,
+  Square,
+  Settings,
+  Trash2,
   X,
   Upload,
   RefreshCw,
@@ -23,7 +26,6 @@ import {
   chooseDirectory,
   chooseExportPath,
   chooseTarArchive,
-  confirmSnapshotDeletion,
   repositoryApi,
 } from "./api";
 import { activeRepository as findActiveRepository, repositoryByPath } from "./routing";
@@ -52,7 +54,7 @@ import type {
 type Notice = { tone: "info" | "success" | "error" | "warning"; message: string };
 type FormValidation<Field extends string> = { message: string; fields: Field[] };
 type GlobalPage = "new" | "import" | null;
-type WorkspaceModal = "add" | "export" | "restore" | null;
+type WorkspaceModal = "add" | "export" | "restore" | "settings" | "deleteSnapshot" | null;
 type SnapshotMap = Record<string, SnapshotInfo[] | undefined>;
 type RepositorySectionKind = "pinned" | "repositories";
 type RepositoryDragState = {
@@ -160,8 +162,30 @@ function AppTitleBar({
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
 }): ReactElement {
-  const appWindow = hasTauriRuntime() ? getCurrentWindow() : undefined;
-  const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose;
+  const appWindow = useMemo(() => (hasTauriRuntime() ? getCurrentWindow() : undefined), []);
+  const SidebarIcon = sidebarCollapsed ? PanelLeftDashed : PanelLeft;
+  const [isMaximized, setIsMaximized] = useState(false);
+  const MaximizeIcon = isMaximized ? Copy : Square;
+
+  useEffect(() => {
+    if (!appWindow) return undefined;
+    let cancelled = false;
+    const updateMaximized = (): void => {
+      void appWindow.isMaximized().then((value) => {
+        if (!cancelled) setIsMaximized(value);
+      });
+    };
+    updateMaximized();
+    let unlisten: (() => void) | undefined;
+    void appWindow.onResized(() => updateMaximized()).then((handler) => {
+      if (cancelled) handler();
+      else unlisten = handler;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [appWindow]);
 
   return (
     <header id="app-titlebar">
@@ -183,7 +207,7 @@ function AppTitleBar({
           void appWindow.startDragging();
         }}
         onDoubleClick={() => {
-          if (appWindow) void appWindow.toggleMaximize();
+          if (appWindow) void appWindow.toggleMaximize().then(() => appWindow.isMaximized()).then(setIsMaximized);
         }}
       />
       <div className="titlebar-window-controls">
@@ -196,11 +220,11 @@ function AppTitleBar({
           }}
         />
         <IconButton
-          className="titlebar-window-button"
-          icon={Maximize2}
+          className={["titlebar-window-button titlebar-maximize-button", isMaximized ? "titlebar-restore-button" : ""].filter(Boolean).join(" ")}
+          icon={MaximizeIcon}
           title="Maximize or restore"
           onClick={() => {
-            if (appWindow) void appWindow.toggleMaximize();
+            if (appWindow) void appWindow.toggleMaximize().then(() => appWindow.isMaximized()).then(setIsMaximized);
           }}
         />
         <IconButton
@@ -552,19 +576,24 @@ function CenteredActionPanel({
   title,
   titleTooltip,
   className,
+  actions,
   children,
 }: {
   icon: LucideIcon;
   title: string;
   titleTooltip?: string;
   className?: string;
+  actions?: ReactNode;
   children: ReactNode;
 }): ReactElement {
   return (
     <div className={["centered-action-panel", className ?? ""].filter(Boolean).join(" ")}>
       <div className="action-panel-heading">
-        <Icon size={22} />
-        <h1 title={titleTooltip}>{title}</h1>
+        <div className="action-panel-title">
+          <Icon size={22} />
+          <h1 title={titleTooltip}>{title}</h1>
+        </div>
+        {actions ? <div className="action-panel-actions">{actions}</div> : null}
       </div>
       {children}
     </div>
@@ -580,20 +609,23 @@ function NewRepositoryPage({
   notice?: Notice;
   busy: boolean;
   onBrowse: () => Promise<string | undefined>;
-  onSubmit: (parentPath: string, name: string) => Promise<boolean>;
+  onSubmit: (parentPath: string, name: string, encryptionAlgorithm: "none" | "aes-256-gcm", encryptionPassword: string) => Promise<boolean>;
 }): ReactElement {
   const [parentPath, setParentPath] = useState("");
   const [name, setName] = useState("");
-  const [invalidFields, setInvalidFields] = useState<Set<"parentPath" | "name">>(() => new Set());
+  const [encryptionAlgorithm, setEncryptionAlgorithm] = useState<"none" | "aes-256-gcm">("none");
+  const [encryptionPassword, setEncryptionPassword] = useState("");
+  const [invalidFields, setInvalidFields] = useState<Set<"parentPath" | "name" | "encryptionPassword">>(() => new Set());
 
-  function validate(): FormValidation<"parentPath" | "name"> | undefined {
-    const fields: Array<"parentPath" | "name"> = [];
+  function validate(): FormValidation<"parentPath" | "name" | "encryptionPassword"> | undefined {
+    const fields: Array<"parentPath" | "name" | "encryptionPassword"> = [];
     if (!parentPath.trim()) fields.push("parentPath");
     if (!name.trim()) fields.push("name");
+    if (encryptionAlgorithm === "aes-256-gcm" && !encryptionPassword) fields.push("encryptionPassword");
     return fields.length > 0 ? { message: "Fill in the highlighted fields.", fields } : undefined;
   }
 
-  function clearInvalid(field: "parentPath" | "name"): void {
+  function clearInvalid(field: "parentPath" | "name" | "encryptionPassword"): void {
     setInvalidFields((current) => {
       if (!current.has(field)) return current;
       const next = new Set(current);
@@ -613,7 +645,7 @@ function NewRepositoryPage({
             setInvalidFields(new Set(validation.fields));
             return;
           }
-          const succeeded = await onSubmit(parentPath, name);
+          const succeeded = await onSubmit(parentPath, name, encryptionAlgorithm, encryptionPassword);
           if (succeeded) setInvalidFields(new Set());
         }}
       >
@@ -661,6 +693,40 @@ function NewRepositoryPage({
             maxLength={120}
           />
         </label>
+        <label>
+          Encryption algorithm
+          <select
+            value={encryptionAlgorithm}
+            disabled={busy}
+            onChange={(event) => {
+              const value = event.target.value === "aes-256-gcm" ? "aes-256-gcm" : "none";
+              setEncryptionAlgorithm(value);
+              if (value === "none") {
+                setEncryptionPassword("");
+                clearInvalid("encryptionPassword");
+              }
+            }}
+          >
+            <option value="none">None</option>
+            <option value="aes-256-gcm">AES-256-GCM</option>
+          </select>
+        </label>
+        {encryptionAlgorithm !== "none" ? (
+          <label>
+            Encryption password
+            <input
+              className={inputStateClass(invalidFields.has("encryptionPassword"))}
+              value={encryptionPassword}
+              onChange={(event) => {
+                setEncryptionPassword(event.target.value);
+                clearInvalid("encryptionPassword");
+              }}
+              disabled={busy}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+        ) : null}
         <div className="form-actions">
           <InlineFormNotice notice={invalidFields.size > 0 ? { tone: "error", message: "Fill in the highlighted fields." } : notice} />
           <button type="submit" className="primary-button" disabled={busy}>
@@ -943,27 +1009,23 @@ function AddSnapshotPage({
   draft,
   notice,
   busy,
-  encryptionPassword,
   onBrowseSource,
   onChangeDraft,
   onChangeFilter,
   onRemoveSource,
-  onPasswordChange,
   onSubmit,
 }: {
   repository: RepositoryRecord;
   draft: RepositoryWorkspace;
   notice?: Notice;
   busy: boolean;
-  encryptionPassword: string;
   onBrowseSource: () => void;
   onChangeDraft: <K extends keyof RepositoryWorkspace>(field: K, value: RepositoryWorkspace[K]) => void;
   onChangeFilter: <K extends keyof BackupFilterDraft>(field: K, value: BackupFilterDraft[K]) => void;
   onRemoveSource: (index: number) => void;
-  onPasswordChange: (value: string) => void;
   onSubmit: () => Promise<boolean>;
 }): ReactElement {
-  type AddField = "sources" | "encryptionPassword" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
+  type AddField = "sources" | "pathRegex" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
   const [invalidFields, setInvalidFields] = useState<Set<AddField>>(() => new Set());
 
   function validate(): FormValidation<AddField> | undefined {
@@ -971,7 +1033,13 @@ function AddSnapshotPage({
     const minimum = draft.filter.minSize ? Number(draft.filter.minSize) : undefined;
     const maximum = draft.filter.maxSize ? Number(draft.filter.maxSize) : undefined;
     if (draft.sourcePaths.length === 0) fields.push("sources");
-    if (draft.encryptionAlgorithm === "aes-256-gcm" && !encryptionPassword) fields.push("encryptionPassword");
+    if (draft.filter.pathRegex.trim()) {
+      try {
+        new RegExp(draft.filter.pathRegex);
+      } catch {
+        fields.push("pathRegex");
+      }
+    }
     if (minimum !== undefined && maximum !== undefined && minimum > maximum) fields.push("minSize", "maxSize");
     if (
       draft.filter.modifiedAfter &&
@@ -1054,49 +1122,27 @@ function AddSnapshotPage({
             <option value="zstd">zstd</option>
           </select>
         </label>
-        <label>
-          Encryption algorithm
-          <select
-            value={draft.encryptionAlgorithm}
-            disabled={busy}
-            onChange={(event) => {
-              const value = event.target.value === "aes-256-gcm" ? "aes-256-gcm" : "none";
-              onChangeDraft("encryptionAlgorithm", value);
-              if (value === "none") {
-                onPasswordChange("");
-                clearInvalid("encryptionPassword");
-              }
-            }}
-          >
-            <option value="none">None</option>
-            <option value="aes-256-gcm">AES-256-GCM</option>
-          </select>
-        </label>
-        {draft.encryptionAlgorithm === "aes-256-gcm" ? (
-          <label className="full-row">
-            Encryption password
-            <input
-              className={inputStateClass(invalidFields.has("encryptionPassword"))}
-              value={encryptionPassword}
-              onChange={(event) => {
-                onPasswordChange(event.target.value);
-                clearInvalid("encryptionPassword");
-              }}
+        {repository.encryptionAlgorithm !== "none" ? (
+          <label>
+            Encrypt this snapshot
+            <select
+              value={draft.encryptSnapshot ? "true" : "false"}
               disabled={busy}
-              type="password"
-              autoComplete="new-password"
-            />
+              onChange={(event) => onChangeDraft("encryptSnapshot", event.target.value === "true")}
+            >
+              <option value="false">No</option>
+              <option value="true">Yes</option>
+            </select>
           </label>
         ) : null}
       </div>
       <details className="advanced-panel" open={draft.filtersOpen} onToggle={(event) => onChangeDraft("filtersOpen", event.currentTarget.open)}>
         <summary>Advanced filters</summary>
         <div className="form-grid three-columns">
-          <label>Include path contains<input value={draft.filter.includePath} disabled={busy} onChange={(event) => onChangeFilter("includePath", event.target.value)} autoComplete="off" /></label>
-          <label>Exclude path contains<input value={draft.filter.excludePath} disabled={busy} onChange={(event) => onChangeFilter("excludePath", event.target.value)} autoComplete="off" /></label>
-          <label>Extensions<input value={draft.filter.extensions} disabled={busy} onChange={(event) => onChangeFilter("extensions", event.target.value)} autoComplete="off" placeholder="txt;png" /></label>
-          <label>Include file name contains<input value={draft.filter.includeName} disabled={busy} onChange={(event) => onChangeFilter("includeName", event.target.value)} autoComplete="off" /></label>
-          <label>Exclude file name contains<input value={draft.filter.excludeName} disabled={busy} onChange={(event) => onChangeFilter("excludeName", event.target.value)} autoComplete="off" /></label>
+          <label className="full-row">Path regex<input className={inputStateClass(invalidFields.has("pathRegex"))} value={draft.filter.pathRegex} disabled={busy} onChange={(event) => {
+            onChangeFilter("pathRegex", event.target.value);
+            clearInvalid("pathRegex");
+          }} autoComplete="off" placeholder=".*\\.txt$" /></label>
           <label>Minimum size<input className={inputStateClass(invalidFields.has("minSize"))} value={draft.filter.minSize} disabled={busy} onChange={(event) => {
             onChangeFilter("minSize", event.target.value);
             clearInvalidFields(["minSize", "maxSize"]);
@@ -1204,6 +1250,284 @@ function ExportRepositoryPage({
   );
 }
 
+function RepositorySettingsPage({
+  repository,
+  notice,
+  busy,
+  repositoryUnlocked,
+  onRename,
+  onUnlock,
+  onChangePassword,
+  onDelete,
+}: {
+  repository: RepositoryRecord;
+  notice?: Notice;
+  busy: boolean;
+  repositoryUnlocked: boolean;
+  onRename: (name: string) => Promise<boolean>;
+  onUnlock: (password: string) => Promise<boolean>;
+  onChangePassword: (oldPassword: string, newPassword: string) => Promise<boolean>;
+  onDelete: (password?: string) => Promise<boolean>;
+}): ReactElement {
+  const [name, setName] = useState(repository.name);
+  const [unlockPassword, setUnlockPassword] = useState("");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [deletePassword, setDeletePassword] = useState("");
+  const [invalidName, setInvalidName] = useState(false);
+  const [invalidPassword, setInvalidPassword] = useState(false);
+  const [invalidPasswordChangeFields, setInvalidPasswordChangeFields] = useState<Set<"oldPassword" | "newPassword" | "confirmPassword">>(() => new Set());
+  const [invalidDeletePassword, setInvalidDeletePassword] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    setName(repository.name);
+    setUnlockPassword("");
+    setOldPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setDeletePassword("");
+    setInvalidName(false);
+    setInvalidPassword(false);
+    setInvalidPasswordChangeFields(new Set());
+    setInvalidDeletePassword(false);
+    setConfirmDelete(false);
+  }, [repository.path, repository.name]);
+
+  async function saveName(): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setInvalidName(true);
+      return;
+    }
+    if (trimmed === repository.name) return;
+    const succeeded = await onRename(trimmed);
+    if (!succeeded) setName(repository.name);
+  }
+
+  async function unlockRepository(): Promise<void> {
+    if (repository.encryptionAlgorithm === "none" || repositoryUnlocked) return;
+    if (!unlockPassword) {
+      setInvalidPassword(true);
+      return;
+    }
+    const succeeded = await onUnlock(unlockPassword);
+    if (succeeded) {
+      setUnlockPassword("");
+      setInvalidPassword(false);
+    } else {
+      setInvalidPassword(true);
+    }
+  }
+
+  function clearPasswordChangeInvalid(field: "oldPassword" | "newPassword" | "confirmPassword"): void {
+    setInvalidPasswordChangeFields((current) => {
+      if (!current.has(field)) return current;
+      const next = new Set(current);
+      next.delete(field);
+      return next;
+    });
+  }
+
+  async function changePassword(): Promise<void> {
+    const fields: Array<"oldPassword" | "newPassword" | "confirmPassword"> = [];
+    if (!oldPassword) fields.push("oldPassword");
+    if (!newPassword) fields.push("newPassword");
+    if (newPassword !== confirmPassword) fields.push("confirmPassword");
+    if (fields.length > 0) {
+      setInvalidPasswordChangeFields(new Set(fields));
+      return;
+    }
+    const succeeded = await onChangePassword(oldPassword, newPassword);
+    if (succeeded) {
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setInvalidPasswordChangeFields(new Set());
+    } else {
+      setInvalidPasswordChangeFields(new Set(["oldPassword"]));
+    }
+  }
+
+  return (
+    <form
+      className="form-panel"
+      aria-label={`Repository settings for ${repository.name}`}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        await saveName();
+      }}
+    >
+      <label>
+        Repository name
+        <input
+          className={inputStateClass(invalidName)}
+          value={name}
+          disabled={busy}
+          onChange={(event) => {
+            setName(event.target.value);
+            setInvalidName(false);
+          }}
+          onBlur={() => void saveName()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void saveName();
+            }
+          }}
+          autoComplete="off"
+          maxLength={120}
+        />
+      </label>
+      {repository.encryptionAlgorithm !== "none" ? (
+        <div className="unlock-zone">
+          <label>
+            Encryption password
+            <input
+              className={inputStateClass(invalidPassword)}
+              value={repositoryUnlocked ? "Repository unlocked" : unlockPassword}
+              disabled={busy || repositoryUnlocked}
+              onChange={(event) => {
+                setUnlockPassword(event.target.value);
+                setInvalidPassword(false);
+              }}
+              type={repositoryUnlocked ? "text" : "password"}
+              autoComplete="current-password"
+            />
+          </label>
+          <div className="form-actions">
+            <InlineFormNotice
+              notice={
+                invalidPassword
+                  ? { tone: "error", message: "Password must not be empty." }
+                  : repositoryUnlocked
+                    ? { tone: "success", message: "Repository encryption is unlocked for this session." }
+                    : undefined
+              }
+            />
+            <button type="button" className="primary-button" disabled={busy || repositoryUnlocked} onClick={() => void unlockRepository()}>
+              Unlock
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {repository.encryptionAlgorithm !== "none" ? (
+        <div className="password-zone">
+          <h2>Change password</h2>
+          <label>
+            Old password
+            <input
+              className={inputStateClass(invalidPasswordChangeFields.has("oldPassword"))}
+              value={oldPassword}
+              disabled={busy}
+              onChange={(event) => {
+                setOldPassword(event.target.value);
+                clearPasswordChangeInvalid("oldPassword");
+              }}
+              type="password"
+              autoComplete="current-password"
+            />
+          </label>
+          <label>
+            New password
+            <input
+              className={inputStateClass(invalidPasswordChangeFields.has("newPassword"))}
+              value={newPassword}
+              disabled={busy}
+              onChange={(event) => {
+                setNewPassword(event.target.value);
+                clearPasswordChangeInvalid("newPassword");
+              }}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+          <label>
+            Confirm new password
+            <input
+              className={inputStateClass(invalidPasswordChangeFields.has("confirmPassword"))}
+              value={confirmPassword}
+              disabled={busy}
+              onChange={(event) => {
+                setConfirmPassword(event.target.value);
+                clearPasswordChangeInvalid("confirmPassword");
+              }}
+              type="password"
+              autoComplete="new-password"
+            />
+          </label>
+          <div className="form-actions">
+            <InlineFormNotice
+              notice={
+                invalidPasswordChangeFields.size > 0
+                  ? { tone: "error", message: "Fill in the highlighted password fields." }
+                  : undefined
+              }
+            />
+            <button type="button" className="primary-button" disabled={busy} onClick={() => void changePassword()}>
+              Change Password
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div className="danger-zone">
+        <h2>Danger zone</h2>
+        {!confirmDelete ? (
+          <button type="button" className="danger-button icon-button-text" disabled={busy} onClick={() => setConfirmDelete(true)}>
+            <Trash2 size={14} />
+            <span>Delete Repository</span>
+          </button>
+        ) : (
+          <div className="confirm-panel">
+            <p>Delete repository "{repository.name}" from disk? This cannot be undone.</p>
+            {repository.encryptionAlgorithm !== "none" ? (
+              <label>
+                Encryption password
+                <input
+                  className={inputStateClass(invalidDeletePassword)}
+                  value={deletePassword}
+                  disabled={busy}
+                  onChange={(event) => {
+                    setDeletePassword(event.target.value);
+                    setInvalidDeletePassword(false);
+                  }}
+                  type="password"
+                  autoComplete="current-password"
+                />
+              </label>
+            ) : null}
+            <div className="form-actions">
+              <button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger-button icon-button-text"
+                disabled={busy}
+                onClick={async () => {
+                  if (repository.encryptionAlgorithm !== "none" && !deletePassword) {
+                    setInvalidDeletePassword(true);
+                    return;
+                  }
+                  const succeeded = await onDelete(repository.encryptionAlgorithm !== "none" ? deletePassword : undefined);
+                  if (!succeeded) setInvalidDeletePassword(repository.encryptionAlgorithm !== "none");
+                }}
+              >
+                <Trash2 size={14} />
+                <span>Delete Repository</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="form-actions">
+        <InlineFormNotice notice={invalidName ? { tone: "error", message: "Repository name must not be empty." } : notice} />
+      </div>
+    </form>
+  );
+}
+
 function RestoreSnapshotPage({
   repository,
   snapshot,
@@ -1225,15 +1549,23 @@ function RestoreSnapshotPage({
   onChangeDraft: <K extends keyof RepositoryWorkspace>(field: K, value: RepositoryWorkspace[K]) => void;
   onPasswordChange: (value: string) => void;
   onBrowse: () => void;
-  onSubmit: () => void;
+  onSubmit: () => Promise<boolean>;
 }): ReactElement {
+  const [invalidPassword, setInvalidPassword] = useState(false);
+
   return (
     <form
       className="form-panel"
       aria-label={`Restore snapshot ${snapshot.title?.trim() || "Untitled"} from ${repository.name}`}
       onSubmit={(event) => {
         event.preventDefault();
-        onSubmit();
+        if (snapshot.hasEncryptedObjects && !decryptionPassword) {
+          setInvalidPassword(true);
+          return;
+        }
+        void onSubmit().then((succeeded) => {
+          if (!succeeded && snapshot.hasEncryptedObjects) setInvalidPassword(true);
+        });
       }}
     >
       <div className="snapshot-summary">
@@ -1270,16 +1602,100 @@ function RestoreSnapshotPage({
           </select>
         </label>
       ) : null}
-      <label>
-        Decryption password
-        <input value={decryptionPassword} disabled={busy} onChange={(event) => onPasswordChange(event.target.value)} type="password" autoComplete="current-password" />
-      </label>
+      {snapshot.hasEncryptedObjects ? (
+        <label>
+          Decryption password
+          <input
+            className={inputStateClass(invalidPassword)}
+            value={decryptionPassword}
+            disabled={busy}
+            onChange={(event) => {
+              onPasswordChange(event.target.value);
+              setInvalidPassword(false);
+            }}
+            type="password"
+            autoComplete="current-password"
+          />
+        </label>
+      ) : null}
       <div className="form-actions">
+        <InlineFormNotice notice={invalidPassword ? { tone: "error", message: "Password is required for this encrypted snapshot." } : undefined} />
         <button type="submit" className="primary-button" disabled={busy}>
           Restore Snapshot
         </button>
       </div>
       <NoticeView notice={notice} />
+    </form>
+  );
+}
+
+function DeleteSnapshotPage({
+  snapshot,
+  notice,
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  snapshot: SnapshotInfo;
+  notice?: Notice;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (password?: string) => Promise<boolean>;
+}): ReactElement {
+  const [password, setPassword] = useState("");
+  const [invalidPassword, setInvalidPassword] = useState(false);
+  return (
+    <form
+      className="form-panel"
+      aria-label={`Delete snapshot ${snapshot.title?.trim() || "Untitled"}`}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (snapshot.hasEncryptedObjects && !password) {
+          setInvalidPassword(true);
+          return;
+        }
+        const succeeded = await onSubmit(snapshot.hasEncryptedObjects ? password : undefined);
+        if (!succeeded && snapshot.hasEncryptedObjects) setInvalidPassword(true);
+      }}
+    >
+      <div className="snapshot-summary">
+        <span>Snapshot</span><strong>{snapshot.title?.trim() || "Untitled"}</strong>
+        <span>Created</span><strong>{formatSnapshotTime(snapshot)}</strong>
+        <span>Snapshot ID</span><code>{snapshot.id}</code>
+      </div>
+      <p className="danger-copy">Delete this snapshot? Unreferenced objects will also be removed.</p>
+      {snapshot.hasEncryptedObjects ? (
+        <label>
+          Encryption password
+          <input
+            className={inputStateClass(invalidPassword)}
+            value={password}
+            disabled={busy}
+            onChange={(event) => {
+              setPassword(event.target.value);
+              setInvalidPassword(false);
+            }}
+            type="password"
+            autoComplete="current-password"
+          />
+        </label>
+      ) : null}
+      <div className="form-actions">
+        <InlineFormNotice
+          notice={
+            invalidPassword
+              ? { tone: "error", message: "Correct password is required to delete this encrypted snapshot." }
+              : notice
+          }
+        />
+        <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="submit" className="danger-button icon-button-text" disabled={busy}>
+          <Trash2 size={14} />
+          <span>Delete Snapshot</span>
+        </button>
+      </div>
     </form>
   );
 }
@@ -1298,8 +1714,9 @@ export function App(): ReactElement {
   const [isResizing, setIsResizing] = useState(false);
   const [busy, setBusy] = useState<string | undefined>();
   const [busySnapshotId, setBusySnapshotId] = useState<string | undefined>();
-  const [encryptionPassword, setEncryptionPassword] = useState("");
+  const [repositoryPasswords, setRepositoryPasswords] = useState<Record<string, string>>({});
   const [decryptionPassword, setDecryptionPassword] = useState("");
+  const [pendingDeleteSnapshot, setPendingDeleteSnapshot] = useState<SnapshotInfo | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -1313,6 +1730,7 @@ export function App(): ReactElement {
               try {
                 const info = await repositoryApi.open(repository.path);
                 repository.name = info.name;
+                repository.encryptionAlgorithm = info.encryptionAlgorithm;
               } catch {
                 setUnavailable((current) => new Set(current).add(repository.path));
               }
@@ -1367,14 +1785,13 @@ export function App(): ReactElement {
       const repository = findActiveRepository(draft);
       if (repository) ensureWorkspace(draft, repository.path).route = route;
     });
-    setEncryptionPassword("");
     setDecryptionPassword("");
   }
 
 function closeWorkspaceModal(): void {
     if (workspace?.route.kind === "restore") setRoute({ kind: "overview" });
     setWorkspaceModal(null);
-    setEncryptionPassword("");
+    setPendingDeleteSnapshot(undefined);
     setDecryptionPassword("");
   }
 
@@ -1530,17 +1947,20 @@ function closeWorkspaceModal(): void {
           notice={globalNotice}
           busy={busy === "new"}
           onBrowse={() => chooseDirectory("Choose repository parent")}
-          onSubmit={async (parentPath, name) => {
+          onSubmit={async (parentPath, name, encryptionAlgorithm, encryptionPassword) => {
             setBusy("new");
             setGlobalNotice({ tone: "info", message: "Creating repository..." });
             try {
-              const info = await repositoryApi.create(parentPath, name);
+              const info = await repositoryApi.create(parentPath, name, encryptionAlgorithm, encryptionPassword);
               let openedPath = info.path;
               updateState((draft) => {
                 openedPath = upsertRepository(draft, info).path;
               });
               setGlobalPage(null);
               setGlobalNotice(undefined);
+              if (encryptionAlgorithm === "aes-256-gcm") {
+                setRepositoryPasswords((current) => ({ ...current, [openedPath]: encryptionPassword }));
+              }
               setNotice(openedPath, "overview", { tone: "success", message: "Repository created." });
               await refreshSnapshots(openedPath, false);
               return true;
@@ -1589,7 +2009,22 @@ function closeWorkspaceModal(): void {
     if (!active || active.archived || !workspace) return <EmptyWorkspace />;
 
     return (
-      <CenteredActionPanel icon={FolderClosed} title={active.name} titleTooltip={active.path}>
+      <CenteredActionPanel
+        icon={FolderClosed}
+        title={active.name}
+        titleTooltip={active.path}
+        actions={
+          <button
+            type="button"
+            className="refresh-button settings-button"
+            aria-label="Repository settings"
+            title="Repository settings"
+            onClick={() => setWorkspaceModal("settings")}
+          >
+            <Settings size={14} />
+          </button>
+        }
+      >
         <ViewRepositoryPage
           snapshots={snapshots[active.path]}
           refreshFeedback={refreshFeedback}
@@ -1628,11 +2063,15 @@ function closeWorkspaceModal(): void {
             setWorkspaceModal("restore");
           }}
           onDelete={async (snapshot) => {
+            if (snapshot.hasEncryptedObjects) {
+              setPendingDeleteSnapshot(snapshot);
+              setWorkspaceModal("deleteSnapshot");
+              return;
+            }
+            if (!window.confirm(`Delete snapshot "${snapshot.title?.trim() || "Untitled"}"? Unreferenced objects will also be removed.`)) return;
             setBusySnapshotId(snapshot.id);
+            setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
             try {
-              const confirmed = await confirmSnapshotDeletion(snapshot.title?.trim() || "Untitled");
-              if (!confirmed) return;
-              setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
               const result = await repositoryApi.deleteSnapshot(active.path, snapshot.id);
               const warning = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
               setNotice(active.path, "overview", {
@@ -1659,7 +2098,6 @@ function closeWorkspaceModal(): void {
           draft={workspace}
           notice={workspaceNotice("add")}
           busy={busy === "backup"}
-          encryptionPassword={encryptionPassword}
           onBrowseSource={async () => {
             const selected = await chooseDirectory("Add source directory");
             if (!selected) return;
@@ -1677,7 +2115,6 @@ function closeWorkspaceModal(): void {
           onRemoveSource={(index) => updateWorkspace(active.path, (draft) => {
             draft.sourcePaths.splice(index, 1);
           })}
-          onPasswordChange={setEncryptionPassword}
           onSubmit={async () => {
             setBusy("backup");
             setNotice(active.path, "add", { tone: "info", message: "Adding snapshot..." });
@@ -1687,15 +2124,14 @@ function closeWorkspaceModal(): void {
                 sources: workspace.sourcePaths,
                 filter: workspace.filter,
                 compressionAlgorithm: workspace.compressionAlgorithm,
-                encryptionAlgorithm: workspace.encryptionAlgorithm,
-                encryptionPassword,
+                encryptSnapshot: active.encryptionAlgorithm !== "none" && workspace.encryptSnapshot,
+                encryptionPassword: repositoryPasswords[active.path] ?? "",
                 snapshotTitle: workspace.snapshotTitle,
               });
               updateWorkspace(active.path, (draft) => {
                 draft.snapshotTitle = "";
                 draft.route = { kind: "overview" };
               });
-              setEncryptionPassword("");
               setNotice(active.path, "overview", {
                 tone: result.ignoredSources.length > 0 ? "warning" : "success",
                 message: `Snapshot added: ${result.fileCount} files, ${formatBytes(result.byteCount)}.${
@@ -1746,6 +2182,94 @@ function closeWorkspaceModal(): void {
           }}
         />
       </WorkspaceModalView>
+    ) : active && workspace && workspaceModal === "settings" ? (
+      <WorkspaceModalView title="Repository Settings" onClose={closeWorkspaceModal}>
+        <RepositorySettingsPage
+          repository={active}
+          notice={workspaceNotice("overview")}
+          busy={busy === "settings" || busy === "delete-repository"}
+          repositoryUnlocked={active.encryptionAlgorithm === "none" || Boolean(repositoryPasswords[active.path])}
+          onRename={async (name) => {
+            setBusy("settings");
+            setNotice(active.path, "overview", { tone: "info", message: "Saving repository name..." });
+            try {
+              const info = await repositoryApi.rename(active.path, name);
+              updateState((draft) => {
+                const repository = repositoryByPath(draft, active.path);
+                if (repository) repository.name = info.name;
+              });
+              setNotice(active.path, "overview", { tone: "success", message: "Repository name updated." });
+              return true;
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+              return false;
+            } finally {
+              setBusy(undefined);
+            }
+          }}
+          onUnlock={async (password) => {
+            setBusy("settings");
+            setNotice(active.path, "overview", { tone: "info", message: "Unlocking repository..." });
+            try {
+              await repositoryApi.unlock(active.path, password);
+              setRepositoryPasswords((current) => ({ ...current, [active.path]: password }));
+              setNotice(active.path, "overview", { tone: "success", message: "Repository unlocked." });
+              return true;
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+              return false;
+            } finally {
+              setBusy(undefined);
+            }
+          }}
+          onChangePassword={async (oldPassword, newPassword) => {
+            setBusy("settings");
+            setNotice(active.path, "overview", { tone: "info", message: "Changing repository password..." });
+            try {
+              await repositoryApi.changePassword(active.path, oldPassword, newPassword);
+              setRepositoryPasswords((current) => ({ ...current, [active.path]: newPassword }));
+              setNotice(active.path, "overview", { tone: "success", message: "Repository password changed." });
+              return true;
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+              return false;
+            } finally {
+              setBusy(undefined);
+            }
+          }}
+          onDelete={async (password) => {
+            setBusy("delete-repository");
+            setNotice(active.path, "overview", { tone: "info", message: "Deleting repository..." });
+            try {
+              await repositoryApi.delete(active.path, password);
+              const removedPath = active.path;
+              updateState((draft) => {
+                draft.repositories = draft.repositories.filter((repository) => repository.path !== removedPath);
+                delete draft.workspaces[removedPath];
+                if (draft.activeRepositoryPath === removedPath) draft.activeRepositoryPath = undefined;
+              });
+              setSnapshots((current) => {
+                const next = { ...current };
+                delete next[removedPath];
+                return next;
+              });
+              setRepositoryPasswords((current) => {
+                const next = { ...current };
+                delete next[removedPath];
+                return next;
+              });
+              setWorkspaceModal(null);
+              setGlobalPage(null);
+              return true;
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+              return false;
+            } finally {
+              setBusy(undefined);
+            }
+          }}
+        />
+      </WorkspaceModalView>
     ) : active && workspace && workspaceModal === "restore" && workspace.route.kind === "restore" ? (
       (() => {
         const restoreRoute = workspace.route;
@@ -1783,8 +2307,10 @@ function closeWorkspaceModal(): void {
                     decryptionPassword,
                   });
                   setNotice(active.path, "restore", { tone: "success", message: `Restored ${result.fileCount} files (${formatBytes(result.byteCount)}).` });
+                  return true;
                 } catch (error) {
                   setNotice(active.path, "restore", { tone: "error", message: String(error) });
+                  return false;
                 } finally {
                   setBusy(undefined);
                 }
@@ -1793,6 +2319,44 @@ function closeWorkspaceModal(): void {
           </WorkspaceModalView>
         );
       })()
+    ) : active && workspaceModal === "deleteSnapshot" && pendingDeleteSnapshot ? (
+      <WorkspaceModalView title="Delete Snapshot" onClose={() => {
+        setPendingDeleteSnapshot(undefined);
+        setWorkspaceModal(null);
+      }}>
+        <DeleteSnapshotPage
+          snapshot={pendingDeleteSnapshot}
+          notice={workspaceNotice("overview")}
+          busy={busy === "delete-snapshot"}
+          onCancel={() => {
+            setPendingDeleteSnapshot(undefined);
+            setWorkspaceModal(null);
+          }}
+          onSubmit={async (password) => {
+            setBusy("delete-snapshot");
+            setBusySnapshotId(pendingDeleteSnapshot.id);
+            setNotice(active.path, "overview", { tone: "info", message: "Deleting snapshot..." });
+            try {
+              const result = await repositoryApi.deleteSnapshot(active.path, pendingDeleteSnapshot.id, password);
+              const warning = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
+              setNotice(active.path, "overview", {
+                tone: result.warnings.length > 0 ? "warning" : "success",
+                message: `Snapshot deleted. Removed ${result.deletedObjectCount} objects and reclaimed ${formatBytes(result.reclaimedBytes)}.${warning}`,
+              });
+              await refreshSnapshots(active.path, false);
+              setPendingDeleteSnapshot(undefined);
+              setWorkspaceModal(null);
+              return true;
+            } catch (error) {
+              setNotice(active.path, "overview", { tone: "error", message: String(error) });
+              return false;
+            } finally {
+              setBusy(undefined);
+              setBusySnapshotId(undefined);
+            }
+          }}
+        />
+      </WorkspaceModalView>
     ) : null;
 
   return (

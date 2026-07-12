@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub(crate) fn create_repository(
     parent_path: String,
     name: String,
+    encryption_algorithm: Option<String>,
+    encryption_password: Option<String>,
 ) -> Result<RepositoryInfoDto, String> {
     let parent = path_from_input(parent_path, "repository parent")?;
     if !parent.is_dir() {
@@ -30,7 +32,15 @@ pub(crate) fn create_repository(
             target.display()
         ));
     }
-    let repository = Repository::init(target).map_err(|error| error.to_string())?;
+    let encryption_algorithm = encryption_algorithm_from_input(encryption_algorithm)?;
+    validate_encryption_password(encryption_algorithm, encryption_password.as_deref())?;
+    let repository = Repository::init_with_options(
+        target,
+        Some(name.to_string()),
+        encryption_algorithm,
+        encryption_password,
+    )
+    .map_err(|error| error.to_string())?;
     repository_info(&repository)
 }
 
@@ -39,6 +49,74 @@ pub(crate) fn open_repository(repository_path: String) -> Result<RepositoryInfoD
     let repository = Repository::open(path_from_input(repository_path, "repository")?)
         .map_err(|error| error.to_string())?;
     repository_info(&repository)
+}
+
+#[tauri::command]
+pub(crate) fn rename_repository(
+    repository_path: String,
+    display_name: String,
+) -> Result<RepositoryInfoDto, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .set_display_name(display_name)
+        .map_err(|error| error.to_string())?;
+    repository_info(&repository)
+}
+
+#[tauri::command]
+pub(crate) fn unlock_repository(
+    repository_path: String,
+    encryption_password: String,
+) -> Result<RepositoryInfoDto, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .verify_encryption_password(Some(encryption_password.as_str()))
+        .map_err(|error| error.to_string())?;
+    repository_info(&repository)
+}
+
+#[tauri::command]
+pub(crate) fn change_repository_password(
+    repository_path: String,
+    old_password: String,
+    new_password: String,
+) -> Result<RepositoryInfoDto, String> {
+    let repository = Repository::open(path_from_input(repository_path, "repository")?)
+        .map_err(|error| error.to_string())?;
+    repository
+        .change_encryption_password(old_password.as_str(), new_password.as_str())
+        .map_err(|error| error.to_string())?;
+    repository_info(&repository)
+}
+
+#[tauri::command]
+pub(crate) fn delete_repository(
+    repository_path: String,
+    encryption_password: Option<String>,
+) -> Result<(), String> {
+    let path = path_from_input(repository_path, "repository")?;
+    let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    if canonical.parent().is_none() {
+        return Err("refusing to delete filesystem root".to_string());
+    }
+    let repository = Repository::open(&canonical).map_err(|error| error.to_string())?;
+    let metadata = repository.metadata().map_err(|error| error.to_string())?;
+    if metadata.encryption_algorithm != EncryptionAlgorithm::None {
+        repository
+            .verify_encryption_password(encryption_password.as_deref())
+            .map_err(|error| error.to_string())?;
+    }
+    for required in ["repo.meta", "objects", "snapshots", "indexes"] {
+        if !canonical.join(required).exists() {
+            return Err(format!(
+                "refusing to delete invalid repository: missing {}",
+                required
+            ));
+        }
+    }
+    fs::remove_dir_all(canonical).map_err(|error| error.to_string())
 }
 
 /// 从 GUI 命令层启动一次同步 repository 备份。
@@ -51,18 +129,28 @@ pub(crate) fn backup(
     filter: Option<BackupFilterDto>,
     compression_algorithm: Option<String>,
     snapshot_title: Option<String>,
-    encryption_algorithm: Option<String>,
+    encrypt_snapshot: Option<bool>,
     encryption_password: Option<String>,
 ) -> Result<BackupResultDto, String> {
     let compression_algorithm = compression_algorithm_from_input(compression_algorithm)?;
-    let encryption_algorithm = encryption_algorithm_from_input(encryption_algorithm)?;
-    validate_encryption_password(encryption_algorithm, encryption_password.as_deref())?;
     let sources = paths_from_input(sources, "source")?;
     for source in &sources {
         ensure_source_directory(source)?;
     }
     let repository_path = path_from_input(destination, "repository")?;
     let repository = open_or_init_repository(repository_path)?;
+    let repository_metadata = repository.metadata().map_err(|error| error.to_string())?;
+    let encryption_algorithm = if encrypt_snapshot.unwrap_or(false) {
+        if repository_metadata.encryption_algorithm == EncryptionAlgorithm::None {
+            return Err("repository encryption is not configured".to_string());
+        }
+        repository
+            .verify_encryption_password(encryption_password.as_deref())
+            .map_err(|error| error.to_string())?;
+        repository_metadata.encryption_algorithm
+    } else {
+        EncryptionAlgorithm::None
+    };
     let filter = filter.map(Into::into).unwrap_or_default();
     let options = BackupOptions {
         compression_algorithm,
@@ -150,12 +238,16 @@ pub(crate) fn list_snapshots(repository_path: String) -> Result<Vec<SnapshotInfo
 pub(crate) fn delete_snapshot(
     repository_path: String,
     snapshot_id: String,
+    encryption_password: Option<String>,
 ) -> Result<SnapshotDeleteResultDto, String> {
     let repository = Repository::open(path_from_input(repository_path, "repository")?)
         .map_err(|error| error.to_string())?;
     repository
         .writer()
-        .delete_snapshot(&snapshot_id_from_input(snapshot_id)?)
+        .delete_snapshot_with_password(
+            &snapshot_id_from_input(snapshot_id)?,
+            encryption_password.as_deref(),
+        )
         .map(Into::into)
         .map_err(|error| error.to_string())
 }
@@ -221,16 +313,20 @@ fn repository_info(repository: &Repository) -> Result<RepositoryInfoDto, String>
     let path = clean_canonical_path(
         fs::canonicalize(repository.root()).map_err(|error| error.to_string())?,
     );
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| path.display().to_string());
+    let metadata = repository.metadata().map_err(|error| error.to_string())?;
     Ok(RepositoryInfoDto {
         path: path.display().to_string(),
-        name,
+        name: metadata.display_name,
+        encryption_algorithm: encryption_algorithm_to_string(metadata.encryption_algorithm),
     })
+}
+
+fn encryption_algorithm_to_string(value: EncryptionAlgorithm) -> String {
+    match value {
+        EncryptionAlgorithm::None => "none",
+        EncryptionAlgorithm::Aes256Gcm => "aes-256-gcm",
+    }
+    .to_string()
 }
 
 fn clean_canonical_path(path: PathBuf) -> PathBuf {

@@ -20,6 +20,12 @@ use tar::{Archive, Builder};
 const REPOSITORY_META: &str = "backup-tool repository v1\n";
 const SNAPSHOT_HEADER: &str = "backup-tool snapshot v1";
 const SNAPSHOT_TITLE_MAX_CHARS: usize = 120;
+const REPOSITORY_DISPLAY_NAME_MAX_CHARS: usize = 120;
+const REPOSITORY_KEY_FORMAT_VERSION: u16 = 1;
+const REPOSITORY_MASTER_KEY_LEN: usize = 32;
+const AES_GCM_NONCE_LEN: usize = 12;
+const ARGON2_SALT_LEN: usize = 16;
+const KEY_ID_LEN: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SnapshotId(String);
@@ -94,6 +100,7 @@ pub struct SnapshotInfo {
     pub created_nanoseconds: Option<u32>,
     pub sequence: Option<u16>,
     pub title: Option<String>,
+    pub has_encrypted_objects: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +109,26 @@ pub struct SnapshotDeleteResult {
     pub deleted_object_count: u64,
     pub reclaimed_bytes: u64,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryMetadata {
+    pub display_name: String,
+    pub encryption_algorithm: EncryptionAlgorithm,
+    format_version: u16,
+    kdf: String,
+    argon2_parameters: String,
+    salt: Option<Vec<u8>>,
+    wrapping_algorithm: String,
+    nonce: Option<Vec<u8>>,
+    wrapped_master_key: Option<Vec<u8>>,
+    key_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryMasterKey {
+    key: [u8; REPOSITORY_MASTER_KEY_LEN],
+    key_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,15 +257,33 @@ pub struct Repository {
 
 impl Repository {
     pub fn init(root: impl Into<PathBuf>) -> BackupCoreResult<Self> {
+        Self::init_with_options(root, None, EncryptionAlgorithm::None, None)
+    }
+
+    pub fn init_with_options(
+        root: impl Into<PathBuf>,
+        display_name: Option<String>,
+        encryption_algorithm: EncryptionAlgorithm,
+        encryption_password: Option<String>,
+    ) -> BackupCoreResult<Self> {
         let root = root.into();
         if root.as_os_str().is_empty() {
             return Err(BackupError::EmptyPath("repository"));
         }
+        validate_encryption_password(encryption_algorithm, encryption_password.as_deref())?;
 
         fs::create_dir_all(root.join("snapshots"))?;
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("indexes"))?;
-        fs::write(root.join("repo.meta"), REPOSITORY_META)?;
+        let display_name = normalize_repository_display_name(display_name)
+            .or_else(|| root.file_name().and_then(|value| value.to_str()).map(ToOwned::to_owned))
+            .unwrap_or_else(|| root.display().to_string());
+        let metadata = RepositoryMetadata::new(
+            display_name,
+            encryption_algorithm,
+            encryption_password.as_deref(),
+        )?;
+        write_repository_metadata(&root.join("repo.meta"), &metadata)?;
 
         Ok(Self { root })
     }
@@ -254,11 +299,81 @@ impl Repository {
                 root.display()
             )));
         }
+        read_repository_metadata(&root.join("repo.meta"))?;
         Ok(Self { root })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn metadata(&self) -> BackupCoreResult<RepositoryMetadata> {
+        read_repository_metadata(&self.root.join("repo.meta"))
+    }
+
+    pub fn set_display_name(&self, display_name: String) -> BackupCoreResult<RepositoryMetadata> {
+        let mut metadata = self.metadata()?;
+        metadata.display_name = normalize_repository_display_name(Some(display_name)).ok_or_else(|| {
+            BackupError::InvalidRepository("repository display name must not be empty".into())
+        })?;
+        write_repository_metadata(&self.root.join("repo.meta"), &metadata)?;
+        Ok(metadata)
+    }
+
+    pub fn verify_encryption_password(&self, password: Option<&str>) -> BackupCoreResult<()> {
+        self.metadata()?.verify_encryption_password(password)
+    }
+
+    pub fn change_encryption_password(
+        &self,
+        old_password: &str,
+        new_password: &str,
+    ) -> BackupCoreResult<RepositoryMetadata> {
+        let current = self.metadata()?;
+        if current.encryption_algorithm == EncryptionAlgorithm::None {
+            return Err(BackupError::InvalidRepository(
+                "repository encryption is not configured".into(),
+            ));
+        }
+        let updated = current.rewrap_master_key(old_password, new_password)?;
+        let meta_path = self.root.join("repo.meta");
+        let temp_path = self.root.join("repo.meta.tmp");
+        write_repository_metadata(&temp_path, &updated).map_err(|error| {
+            BackupError::InvalidRepository(format!("failed to write temporary repo metadata: {error}"))
+        })?;
+        let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)?;
+        file.sync_all()?;
+        drop(file);
+        read_repository_metadata(&temp_path)?.verify_encryption_password(Some(new_password))?;
+        match fs::rename(&temp_path, &meta_path) {
+            Ok(()) => {}
+            Err(_error) if meta_path.exists() => {
+                let backup_path = self.root.join("repo.meta.bak");
+                let _ = fs::remove_file(&backup_path);
+                if fs::rename(&meta_path, &backup_path).is_ok() {
+                    if let Err(error) = fs::rename(&temp_path, &meta_path) {
+                        let _ = fs::rename(&backup_path, &meta_path);
+                        return Err(BackupError::InvalidRepository(format!(
+                            "failed to promote temporary repo metadata: {error}"
+                        )));
+                    }
+                    let _ = fs::remove_file(&backup_path);
+                } else {
+                    fs::copy(&temp_path, &meta_path).map_err(|error| {
+                        BackupError::InvalidRepository(format!(
+                            "failed to replace repo metadata by copy: {error}"
+                        ))
+                    })?;
+                    fs::remove_file(&temp_path).map_err(|error| {
+                        BackupError::InvalidRepository(format!(
+                            "failed to remove temporary repo metadata: {error}"
+                        ))
+                    })?;
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(updated)
     }
 
     fn snapshots_dir(&self) -> PathBuf {
@@ -392,6 +507,324 @@ impl Repository {
     }
 }
 
+impl RepositoryMetadata {
+    fn new(
+        display_name: String,
+        encryption_algorithm: EncryptionAlgorithm,
+        encryption_password: Option<&str>,
+    ) -> BackupCoreResult<Self> {
+        match encryption_algorithm {
+            EncryptionAlgorithm::None => Ok(Self {
+                display_name,
+                encryption_algorithm,
+                format_version: REPOSITORY_KEY_FORMAT_VERSION,
+                kdf: "none".to_string(),
+                argon2_parameters: "none".to_string(),
+                salt: None,
+                wrapping_algorithm: "none".to_string(),
+                nonce: None,
+                wrapped_master_key: None,
+                key_id: None,
+            }),
+            EncryptionAlgorithm::Aes256Gcm => {
+                let password = required_password(encryption_password)?;
+                let master_key = random_bytes(REPOSITORY_MASTER_KEY_LEN);
+                let salt = random_bytes(ARGON2_SALT_LEN);
+                let nonce = random_bytes(AES_GCM_NONCE_LEN);
+                let key_id = hex::encode(random_bytes(KEY_ID_LEN));
+                let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, &salt)?)
+                    .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
+                let wrapped_master_key = cipher
+                    .encrypt(Nonce::from_slice(&nonce), master_key.as_slice())
+                    .map_err(|_| BackupError::InvalidRepository("failed to wrap repository master key".into()))?;
+                Ok(Self {
+                    display_name,
+                    encryption_algorithm,
+                    format_version: REPOSITORY_KEY_FORMAT_VERSION,
+                    kdf: "argon2id".to_string(),
+                    argon2_parameters: "default".to_string(),
+                    salt: Some(salt),
+                    wrapping_algorithm: "aes-256-gcm".to_string(),
+                    nonce: Some(nonce),
+                    wrapped_master_key: Some(wrapped_master_key),
+                    key_id: Some(key_id),
+                })
+            }
+        }
+    }
+
+    pub fn verify_encryption_password(&self, password: Option<&str>) -> BackupCoreResult<()> {
+        self.unlock_master_key(password).map(|_| ())
+    }
+
+    fn unlock_master_key(&self, password: Option<&str>) -> BackupCoreResult<Option<RepositoryMasterKey>> {
+        match self.encryption_algorithm {
+            EncryptionAlgorithm::None => {
+                self.validate_structure()?;
+                Ok(None)
+            }
+            EncryptionAlgorithm::Aes256Gcm => {
+                self.validate_structure()?;
+                let password = required_password(password)?;
+                let salt = self.salt.as_deref().ok_or_else(|| {
+                    BackupError::InvalidRepository("encrypted repository missing salt".into())
+                })?;
+                let nonce = self.nonce.as_deref().ok_or_else(|| {
+                    BackupError::InvalidRepository("encrypted repository missing nonce".into())
+                })?;
+                let wrapped_master_key = self.wrapped_master_key.as_deref().ok_or_else(|| {
+                    BackupError::InvalidRepository("encrypted repository missing wrapped master key".into())
+                })?;
+                let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, salt)?)
+                    .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
+                let decrypted = cipher.decrypt(Nonce::from_slice(nonce), wrapped_master_key).map_err(|_| {
+                    BackupError::InvalidRepository(
+                        "failed to unlock repository; password may be incorrect".into(),
+                    )
+                })?;
+                if decrypted.len() != REPOSITORY_MASTER_KEY_LEN {
+                    return Err(BackupError::InvalidRepository(
+                        "invalid repository master key length".into(),
+                    ));
+                }
+                let mut key = [0_u8; REPOSITORY_MASTER_KEY_LEN];
+                key.copy_from_slice(&decrypted);
+                Ok(Some(RepositoryMasterKey {
+                    key,
+                    key_id: self.key_id.clone().ok_or_else(|| {
+                        BackupError::InvalidRepository("encrypted repository missing key id".into())
+                    })?,
+                }))
+            }
+        }
+    }
+
+    fn rewrap_master_key(&self, old_password: &str, new_password: &str) -> BackupCoreResult<Self> {
+        let master_key = self.unlock_master_key(Some(old_password))?.ok_or_else(|| {
+            BackupError::InvalidRepository("repository encryption is not configured".into())
+        })?;
+        required_password(Some(new_password))?;
+        let salt = random_bytes(ARGON2_SALT_LEN);
+        let nonce = random_bytes(AES_GCM_NONCE_LEN);
+        let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(new_password, &salt)?)
+            .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
+        let wrapped_master_key = cipher
+            .encrypt(Nonce::from_slice(&nonce), master_key.key.as_slice())
+            .map_err(|_| BackupError::InvalidRepository("failed to wrap repository master key".into()))?;
+        Ok(Self {
+            display_name: self.display_name.clone(),
+            encryption_algorithm: self.encryption_algorithm,
+            format_version: REPOSITORY_KEY_FORMAT_VERSION,
+            kdf: "argon2id".to_string(),
+            argon2_parameters: "default".to_string(),
+            salt: Some(salt),
+            wrapping_algorithm: "aes-256-gcm".to_string(),
+            nonce: Some(nonce),
+            wrapped_master_key: Some(wrapped_master_key),
+            key_id: self.key_id.clone(),
+        })
+    }
+
+    fn validate_structure(&self) -> BackupCoreResult<()> {
+        match self.encryption_algorithm {
+            EncryptionAlgorithm::None => {
+                if self.format_version != REPOSITORY_KEY_FORMAT_VERSION {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository key format version: {}",
+                        self.format_version
+                    )));
+                }
+                if self.kdf != "none" {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository kdf: {}",
+                        self.kdf
+                    )));
+                }
+                if self.argon2_parameters != "none" || self.wrapping_algorithm != "none" {
+                    return Err(BackupError::InvalidRepository(
+                        "unencrypted repository must not contain key wrapping metadata".into(),
+                    ));
+                }
+                if self.salt.is_some()
+                    || self.nonce.is_some()
+                    || self.wrapped_master_key.is_some()
+                    || self.key_id.is_some()
+                {
+                    return Err(BackupError::InvalidRepository(
+                        "unencrypted repository must not contain encryption verifier fields".into(),
+                    ));
+                }
+                Ok(())
+            }
+            EncryptionAlgorithm::Aes256Gcm => {
+                if self.format_version != REPOSITORY_KEY_FORMAT_VERSION {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository key format version: {}",
+                        self.format_version
+                    )));
+                }
+                if self.kdf != "argon2id" {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository kdf: {}",
+                        self.kdf
+                    )));
+                }
+                if self.salt.as_ref().is_none_or(Vec::is_empty) {
+                    return Err(BackupError::InvalidRepository(
+                        "encrypted repository missing salt".into(),
+                    ));
+                }
+                if self.argon2_parameters != "default" {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository argon2 parameters: {}",
+                        self.argon2_parameters
+                    )));
+                }
+                if self.wrapping_algorithm != "aes-256-gcm" {
+                    return Err(BackupError::InvalidRepository(format!(
+                        "unsupported repository master key wrapping algorithm: {}",
+                        self.wrapping_algorithm
+                    )));
+                }
+                if self.nonce.as_ref().is_none_or(Vec::is_empty) {
+                    return Err(BackupError::InvalidRepository(
+                        "encrypted repository missing nonce".into(),
+                    ));
+                }
+                if self.wrapped_master_key.as_ref().is_none_or(Vec::is_empty) {
+                    return Err(BackupError::InvalidRepository(
+                        "encrypted repository missing wrapped master key".into(),
+                    ));
+                }
+                if self.key_id.as_ref().is_none_or(String::is_empty) {
+                    return Err(BackupError::InvalidRepository(
+                        "encrypted repository missing key id".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn normalize_repository_display_name(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(REPOSITORY_DISPLAY_NAME_MAX_CHARS).collect())
+}
+
+fn read_repository_metadata(path: &Path) -> BackupCoreResult<RepositoryMetadata> {
+    let text = fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    if lines.next() != Some(REPOSITORY_META.trim_end()) {
+        return Err(BackupError::InvalidRepository("invalid repo.meta header".into()));
+    }
+
+    let mut display_name = None;
+    let mut encryption_algorithm = None;
+    let mut format_version = None;
+    let mut kdf = None;
+    let mut argon2_parameters = None;
+    let mut salt = None;
+    let mut wrapping_algorithm = None;
+    let mut nonce = None;
+    let mut wrapped_master_key = None;
+    let mut key_id = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('\t') else {
+            return Err(BackupError::InvalidRepository(format!(
+                "invalid repo.meta line: {line}"
+            )));
+        };
+        match key {
+            "display_name" => display_name = Some(unescape_field(value)?),
+            "encryption" => encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?),
+            "key_format_version" => {
+                format_version = Some(value.parse::<u16>().map_err(|_| {
+                    BackupError::InvalidRepository(format!(
+                        "invalid repository key format version: {value}"
+                    ))
+                })?);
+            }
+            "kdf" => kdf = Some(value.to_string()),
+            "argon2_parameters" => argon2_parameters = Some(value.to_string()),
+            "salt" => salt = parse_optional_hex(value, "repository salt")?,
+            "wrapping_algorithm" => wrapping_algorithm = Some(value.to_string()),
+            "nonce" => nonce = parse_optional_hex(value, "repository nonce")?,
+            "wrapped_master_key" => {
+                wrapped_master_key = parse_optional_hex(value, "repository wrapped master key")?
+            }
+            "key_id" => key_id = if value.is_empty() { None } else { Some(value.to_string()) },
+            _ => {}
+        }
+    }
+
+    let display_name = display_name
+        .and_then(|value| normalize_repository_display_name(Some(value)))
+        .ok_or_else(|| BackupError::InvalidRepository("repo.meta missing display_name".into()))?;
+    let encryption_algorithm = encryption_algorithm
+        .ok_or_else(|| BackupError::InvalidRepository("repo.meta missing encryption".into()))?;
+    let metadata = RepositoryMetadata {
+        display_name,
+        encryption_algorithm,
+        format_version: format_version.ok_or_else(|| {
+            BackupError::InvalidRepository(
+                "repo.meta missing key_format_version; old repositories are not supported".into(),
+            )
+        })?,
+        kdf: kdf.unwrap_or_else(|| "none".to_string()),
+        argon2_parameters: argon2_parameters.unwrap_or_else(|| "none".to_string()),
+        salt,
+        wrapping_algorithm: wrapping_algorithm.unwrap_or_else(|| "none".to_string()),
+        nonce,
+        wrapped_master_key,
+        key_id,
+    };
+    metadata.validate_structure()?;
+    Ok(metadata)
+}
+
+fn write_repository_metadata(path: &Path, metadata: &RepositoryMetadata) -> BackupCoreResult<()> {
+    let mut output = String::from(REPOSITORY_META);
+    output.push_str("display_name\t");
+    output.push_str(&escape_field(&metadata.display_name));
+    output.push('\n');
+    output.push_str("encryption\t");
+    output.push_str(metadata.encryption_algorithm.as_object_value());
+    output.push('\n');
+    output.push_str("key_format_version\t");
+    output.push_str(&metadata.format_version.to_string());
+    output.push('\n');
+    output.push_str("kdf\t");
+    output.push_str(&metadata.kdf);
+    output.push('\n');
+    output.push_str("argon2_parameters\t");
+    output.push_str(&metadata.argon2_parameters);
+    output.push('\n');
+    output.push_str("salt\t");
+    output.push_str(&metadata.salt.as_ref().map(hex::encode).unwrap_or_default());
+    output.push('\n');
+    output.push_str("wrapping_algorithm\t");
+    output.push_str(&metadata.wrapping_algorithm);
+    output.push('\n');
+    output.push_str("nonce\t");
+    output.push_str(&metadata.nonce.as_ref().map(hex::encode).unwrap_or_default());
+    output.push('\n');
+    output.push_str("wrapped_master_key\t");
+    output.push_str(&metadata.wrapped_master_key.as_ref().map(hex::encode).unwrap_or_default());
+    output.push('\n');
+    output.push_str("key_id\t");
+    output.push_str(metadata.key_id.as_deref().unwrap_or_default());
+    output.push('\n');
+    fs::write(path, output)?;
+    Ok(())
+}
+
 fn canonical_output_path(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return fs::canonicalize(path).ok();
@@ -511,14 +944,14 @@ impl ObjectStore {
         )
     }
 
-    pub fn write_object_with_options(
+    fn write_object_with_options(
         &self,
         bytes: &[u8],
         compression_algorithm: CompressionAlgorithm,
         encryption_algorithm: EncryptionAlgorithm,
-        encryption_password: Option<&str>,
+        master_key: Option<&RepositoryMasterKey>,
     ) -> BackupCoreResult<StoredObject> {
-        validate_encryption_password(encryption_algorithm, encryption_password)?;
+        validate_encryption_key(encryption_algorithm, master_key)?;
         fs::create_dir_all(&self.root)?;
         let object_id = ContentHasher::hash_bytes(bytes, encryption_algorithm);
         let path = self.path_for(&object_id);
@@ -533,7 +966,7 @@ impl ObjectStore {
             if existing.encryption_algorithm == EncryptionAlgorithm::Aes256Gcm
                 && encryption_algorithm == EncryptionAlgorithm::Aes256Gcm
             {
-                let decoded = self.read_object_with_password(&object_id, encryption_password)?;
+                let decoded = self.read_object_with_master_key(&object_id, master_key)?;
                 if decoded != bytes {
                     return Err(BackupError::InvalidRepository(format!(
                         "existing encrypted object content mismatch: {}",
@@ -551,7 +984,7 @@ impl ObjectStore {
                 bytes,
                 compression_algorithm,
                 encryption_algorithm,
-                encryption_password,
+                master_key,
             )?)?;
         }
         Ok(StoredObject {
@@ -562,13 +995,13 @@ impl ObjectStore {
     }
 
     pub fn read_object(&self, object_id: &ObjectId) -> BackupCoreResult<Vec<u8>> {
-        self.read_object_with_password(object_id, None)
+        self.read_object_with_master_key(object_id, None)
     }
 
-    pub fn read_object_with_password(
+    fn read_object_with_master_key(
         &self,
         object_id: &ObjectId,
-        decryption_password: Option<&str>,
+        master_key: Option<&RepositoryMasterKey>,
     ) -> BackupCoreResult<Vec<u8>> {
         let bytes = fs::read(self.path_for(object_id))?;
         let header = read_object_header(&bytes)?;
@@ -578,7 +1011,7 @@ impl ObjectStore {
                 object_id.as_str()
             )));
         }
-        decode_object(&bytes, decryption_password)
+        decode_object(&bytes, master_key)
     }
 
     fn path_for(&self, object_id: &ObjectId) -> PathBuf {
@@ -592,8 +1025,7 @@ const OBJECT_HEADER_MAGIC: &str = "backup-tool object v1";
 struct ObjectHeader {
     compression_algorithm: CompressionAlgorithm,
     encryption_algorithm: EncryptionAlgorithm,
-    kdf: String,
-    salt: Option<Vec<u8>>,
+    key_id: Option<String>,
     nonce: Option<Vec<u8>>,
     original_size: u64,
     payload_size: u64,
@@ -604,26 +1036,22 @@ fn encode_object(
     bytes: &[u8],
     compression_algorithm: CompressionAlgorithm,
     encryption_algorithm: EncryptionAlgorithm,
-    encryption_password: Option<&str>,
+    master_key: Option<&RepositoryMasterKey>,
 ) -> BackupCoreResult<Vec<u8>> {
-    validate_encryption_password(encryption_algorithm, encryption_password)?;
+    validate_encryption_key(encryption_algorithm, master_key)?;
     let compressed = match compression_algorithm {
         CompressionAlgorithm::None => Ok(bytes.to_vec()),
         CompressionAlgorithm::Zstd => zstd::stream::encode_all(bytes, 3).map_err(BackupError::Io),
     }?;
-    let encrypted = encrypt_payload(&compressed, encryption_algorithm, encryption_password)?;
+    let encrypted = encrypt_payload(&compressed, encryption_algorithm, master_key)?;
     let header = format!(
-        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\nencryption\t{}\nkdf\t{}\nsalt\t{}\nnonce\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
+        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\nencryption\t{}\nkey_id\t{}\nnonce\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
         compression_algorithm.as_object_value(),
         encryption_algorithm.as_object_value(),
-        match encryption_algorithm {
-            EncryptionAlgorithm::None => "none",
-            EncryptionAlgorithm::Aes256Gcm => "argon2id",
-        },
         encrypted
-            .salt
+            .key_id
             .as_ref()
-            .map(hex::encode)
+            .map(String::as_str)
             .unwrap_or_default(),
         encrypted
             .nonce
@@ -639,7 +1067,7 @@ fn encode_object(
     Ok(output)
 }
 
-fn decode_object(bytes: &[u8], decryption_password: Option<&str>) -> BackupCoreResult<Vec<u8>> {
+fn decode_object(bytes: &[u8], master_key: Option<&RepositoryMasterKey>) -> BackupCoreResult<Vec<u8>> {
     let header = read_object_header(bytes)?;
     let payload = &bytes[header.header_len..];
     if payload.len() != usize::try_from(header.payload_size).unwrap_or(usize::MAX) {
@@ -650,7 +1078,7 @@ fn decode_object(bytes: &[u8], decryption_password: Option<&str>) -> BackupCoreR
         )));
     }
 
-    let decrypted = decrypt_payload(payload, &header, decryption_password)?;
+    let decrypted = decrypt_payload(payload, &header, master_key)?;
     let decoded = match header.compression_algorithm {
         CompressionAlgorithm::None => Ok(decrypted),
         CompressionAlgorithm::Zstd => {
@@ -669,35 +1097,34 @@ fn decode_object(bytes: &[u8], decryption_password: Option<&str>) -> BackupCoreR
 
 struct EncryptedPayload {
     payload: Vec<u8>,
-    salt: Option<Vec<u8>>,
+    key_id: Option<String>,
     nonce: Option<Vec<u8>>,
 }
 
 fn encrypt_payload(
     payload: &[u8],
     encryption_algorithm: EncryptionAlgorithm,
-    encryption_password: Option<&str>,
+    master_key: Option<&RepositoryMasterKey>,
 ) -> BackupCoreResult<EncryptedPayload> {
     match encryption_algorithm {
         EncryptionAlgorithm::None => Ok(EncryptedPayload {
             payload: payload.to_vec(),
-            salt: None,
+            key_id: None,
             nonce: None,
         }),
         EncryptionAlgorithm::Aes256Gcm => {
-            let password = required_password(encryption_password)?;
-            let mut salt = vec![0_u8; 16];
-            let mut nonce = vec![0_u8; 12];
-            rand::thread_rng().fill_bytes(&mut salt);
-            rand::thread_rng().fill_bytes(&mut nonce);
-            let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, &salt)?)
+            let master_key = master_key.ok_or_else(|| {
+                BackupError::InvalidRepository("repository master key is required".into())
+            })?;
+            let nonce = random_bytes(AES_GCM_NONCE_LEN);
+            let cipher = Aes256Gcm::new_from_slice(&master_key.key)
                 .map_err(|_| BackupError::InvalidRepository("invalid AES key length".into()))?;
             let encrypted = cipher
                 .encrypt(Nonce::from_slice(&nonce), payload)
                 .map_err(|_| BackupError::InvalidRepository("object encryption failed".into()))?;
             Ok(EncryptedPayload {
                 payload: encrypted,
-                salt: Some(salt),
+                key_id: Some(master_key.key_id.clone()),
                 nonce: Some(nonce),
             })
         }
@@ -707,21 +1134,22 @@ fn encrypt_payload(
 fn decrypt_payload(
     payload: &[u8],
     header: &ObjectHeader,
-    decryption_password: Option<&str>,
+    master_key: Option<&RepositoryMasterKey>,
 ) -> BackupCoreResult<Vec<u8>> {
     match header.encryption_algorithm {
         EncryptionAlgorithm::None => Ok(payload.to_vec()),
         EncryptionAlgorithm::Aes256Gcm => {
-            if header.kdf != "argon2id" {
+            let master_key = master_key.ok_or_else(|| {
+                BackupError::InvalidRepository("encryption password must not be empty".into())
+            })?;
+            let key_id = header.key_id.as_deref().ok_or_else(|| {
+                BackupError::InvalidRepository("encrypted object key id is missing".into())
+            })?;
+            if key_id != master_key.key_id {
                 return Err(BackupError::InvalidRepository(format!(
-                    "unsupported object kdf: {}",
-                    header.kdf
+                    "object key id does not match repository key id: {key_id}"
                 )));
             }
-            let password = required_password(decryption_password)?;
-            let salt = header.salt.as_deref().ok_or_else(|| {
-                BackupError::InvalidRepository("encrypted object salt is missing".into())
-            })?;
             let nonce = header.nonce.as_deref().ok_or_else(|| {
                 BackupError::InvalidRepository("encrypted object nonce is missing".into())
             })?;
@@ -731,7 +1159,7 @@ fn decrypt_payload(
                     nonce.len()
                 )));
             }
-            let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, salt)?)
+            let cipher = Aes256Gcm::new_from_slice(&master_key.key)
                 .map_err(|_| BackupError::InvalidRepository("invalid AES key length".into()))?;
             cipher
                 .decrypt(Nonce::from_slice(nonce), payload)
@@ -742,6 +1170,18 @@ fn decrypt_payload(
                 })
         }
     }
+}
+
+fn validate_encryption_key(
+    encryption_algorithm: EncryptionAlgorithm,
+    master_key: Option<&RepositoryMasterKey>,
+) -> BackupCoreResult<()> {
+    if encryption_algorithm == EncryptionAlgorithm::Aes256Gcm && master_key.is_none() {
+        return Err(BackupError::InvalidRepository(
+            "repository master key is required".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_encryption_password(
@@ -772,6 +1212,12 @@ fn derive_encryption_key(password: &str, salt: &[u8]) -> BackupCoreResult<[u8; 3
     Ok(key)
 }
 
+fn random_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0_u8; len];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes
+}
+
 fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
     let separator = find_header_separator(bytes).ok_or_else(|| {
         BackupError::InvalidRepository("object header terminator is missing".into())
@@ -791,8 +1237,7 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
 
     let mut compression_algorithm = None;
     let mut encryption_algorithm = None;
-    let mut kdf = None;
-    let mut salt = None;
+    let mut key_id = None;
     let mut nonce = None;
     let mut original_size = None;
     let mut payload_size = None;
@@ -809,11 +1254,8 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
             "encryption" => {
                 encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?);
             }
-            "kdf" => {
-                kdf = Some(value.to_string());
-            }
-            "salt" => {
-                salt = parse_optional_hex(value, "salt")?;
+            "key_id" => {
+                key_id = if value.is_empty() { None } else { Some(value.to_string()) };
             }
             "nonce" => {
                 nonce = parse_optional_hex(value, "nonce")?;
@@ -840,9 +1282,12 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
         compression_algorithm: compression_algorithm.ok_or_else(|| {
             BackupError::InvalidRepository("object compression is missing".into())
         })?,
-        encryption_algorithm: encryption_algorithm.unwrap_or(EncryptionAlgorithm::None),
-        kdf: kdf.unwrap_or_else(|| "none".to_string()),
-        salt,
+        encryption_algorithm: encryption_algorithm.ok_or_else(|| {
+            BackupError::InvalidRepository(
+                "object encryption is missing; old object format is not supported".into(),
+            )
+        })?,
+        key_id,
         nonce,
         original_size: original_size.ok_or_else(|| {
             BackupError::InvalidRepository("object original size is missing".into())
@@ -926,6 +1371,7 @@ impl RepositoryWriter {
     ) -> BackupCoreResult<Snapshot> {
         let raw_sources = sources.into_iter().map(Into::into).collect::<Vec<_>>();
         let normalized = normalize_sources(&raw_sources)?;
+        filter.validate()?;
         let snapshot_title = normalize_snapshot_title(options.snapshot_title)?;
 
         let created = self.create_snapshot_id()?;
@@ -948,6 +1394,17 @@ impl RepositoryWriter {
             entries: Vec::new(),
         };
         let object_store = self.repository.object_store();
+        let master_key = if options.encryption_algorithm == EncryptionAlgorithm::Aes256Gcm {
+            let metadata = self.repository.metadata()?;
+            if metadata.encryption_algorithm == EncryptionAlgorithm::None {
+                return Err(BackupError::InvalidRepository(
+                    "repository encryption is not configured".into(),
+                ));
+            }
+            metadata.unlock_master_key(options.encryption_password.as_deref())?
+        } else {
+            None
+        };
 
         for (source_index, source) in normalized.sources.iter().enumerate() {
             let provider = AutoFileSystemProvider::for_path(source);
@@ -960,7 +1417,7 @@ impl RepositoryWriter {
                 &object_store,
                 options.compression_algorithm,
                 options.encryption_algorithm,
-                options.encryption_password.as_deref(),
+                master_key.as_ref(),
                 &mut snapshot_file,
             )?;
         }
@@ -981,6 +1438,14 @@ impl RepositoryWriter {
         &self,
         snapshot_id: &SnapshotId,
     ) -> BackupCoreResult<SnapshotDeleteResult> {
+        self.delete_snapshot_with_password(snapshot_id, None)
+    }
+
+    pub fn delete_snapshot_with_password(
+        &self,
+        snapshot_id: &SnapshotId,
+        encryption_password: Option<&str>,
+    ) -> BackupCoreResult<SnapshotDeleteResult> {
         let target_path = self.repository.snapshot_path(snapshot_id);
         if !target_path.is_file() {
             return Err(BackupError::SnapshotDoesNotExist(
@@ -989,6 +1454,11 @@ impl RepositoryWriter {
         }
 
         let target = read_snapshot_file(&target_path)?;
+        if target.has_encrypted_objects()? {
+            self.repository
+                .metadata()?
+                .unlock_master_key(encryption_password)?;
+        }
         let target_objects = snapshot_object_ids(&target)?;
         let mut remaining_objects = HashSet::new();
         for entry in fs::read_dir(self.repository.snapshots_dir())? {
@@ -1240,6 +1710,13 @@ impl RepositoryReader {
 
         let snapshot_file = self.read_snapshot(snapshot_id)?;
         let object_store = self.repository.object_store();
+        let master_key = if snapshot_file.has_encrypted_objects()? {
+            self.repository
+                .metadata()?
+                .unlock_master_key(options.decryption_password.as_deref())?
+        } else {
+            None
+        };
         let writer = AutoFileSystemProvider::for_path(destination);
         let mut report = RestoreReport::default();
         let is_multi_source = snapshot_file.sources.len() > 1;
@@ -1277,10 +1754,7 @@ impl RepositoryReader {
                     };
                     writer.write_file(
                         &target,
-                        &object_store.read_object_with_password(
-                            object_id,
-                            options.decryption_password.as_deref(),
-                        )?,
+                        &object_store.read_object_with_master_key(object_id, master_key.as_ref())?,
                     )?;
                     report.warnings.extend(writer.restore_metadata(
                         &target,
@@ -1323,6 +1797,7 @@ impl SnapshotInfo {
             created_nanoseconds: Some(snapshot_file.created_nanoseconds),
             sequence: Some(snapshot_file.sequence),
             title: snapshot_file.title.clone(),
+            has_encrypted_objects: snapshot_file.has_encrypted_objects().unwrap_or(false),
         }
     }
 }
@@ -1346,7 +1821,7 @@ fn scan_into_snapshot_file(
     object_store: &ObjectStore,
     compression_algorithm: CompressionAlgorithm,
     encryption_algorithm: EncryptionAlgorithm,
-    encryption_password: Option<&str>,
+    master_key: Option<&RepositoryMasterKey>,
     snapshot_file: &mut SnapshotFile,
 ) -> BackupCoreResult<()> {
     for entry in fs::read_dir(current)? {
@@ -1369,7 +1844,7 @@ fn scan_into_snapshot_file(
                 object_store,
                 compression_algorithm,
                 encryption_algorithm,
-                encryption_password,
+                master_key,
                 snapshot_file,
             )?;
             continue;
@@ -1396,7 +1871,7 @@ fn scan_into_snapshot_file(
             &bytes,
             compression_algorithm,
             encryption_algorithm,
-            encryption_password,
+            master_key,
         )?;
 
         snapshot_file.push_entry(source_index, file_entry, Some(stored_object.object_id));
@@ -1406,6 +1881,17 @@ fn scan_into_snapshot_file(
 }
 
 impl SnapshotFile {
+    pub fn has_encrypted_objects(&self) -> BackupCoreResult<bool> {
+        for entry in &self.entries {
+            if let Some(object_id) = &entry.object_id {
+                if object_id.encryption_algorithm()? == EncryptionAlgorithm::Aes256Gcm {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn push_entry(
         &mut self,
         source_index: usize,
