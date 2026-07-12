@@ -244,6 +244,7 @@ export function upsertRepository(
     const oldPath = repository.path;
     repository.path = info.path;
     repository.name = info.name;
+    repository.encryptionAlgorithm = info.encryptionAlgorithm;
     repository.archived = false;
     if (updateLastOpenedAt) repository.lastOpenedAt = Date.now();
     if (oldPath !== info.path && state.workspaces[oldPath]) {

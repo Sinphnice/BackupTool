@@ -1,49 +1,50 @@
 # BackupTool 项目概览
 
-本文用于帮助开发者快速理解 BackupTool 的项目组成、架构设计、核心数据模型、构建方式和测试分布。环境安装细节见 [DEVELOPMENT.md](DEVELOPMENT.md)，课程要求见 [course.md](course.md)，后续开发规划见 [../.agents/PLAN.md](../.agents/PLAN.md)。
+本文用于帮助开发者快速理解 BackupTool 的项目组成、架构设计、核心数据模型、构建方式和测试分布。环境安装细节见 [DEVELOPMENT.md](DEVELOPMENT.md)，课程要求见 [course.md](course.md)。
 
 ## 1. 项目定位
 
-BackupTool 是一个基于 Tauri 2 的桌面备份工具。当前版本已经从早期 C++ Core + Rust FFI 方案迁移为纯 Rust 后端核心，整体调用链为：
+BackupTool 是一个基于 Tauri 2 的桌面备份工具。当前版本已经完成从早期实验性实现到仓库式备份模型的迁移，后端边界为纯 Rust：
 
 ```text
 React TypeScript GUI
     -> Tauri command
-        -> Rust backup-core
+        -> backup-core Rust library
+            -> filesystem repository
 ```
 
-当前备份格式采用目录型 repository，而不是简单镜像复制。每次备份生成一个 snapshot 文件，普通文件内容写入 object store；恢复时选择 snapshot，并按恢复路径策略将对象内容还原到目标目录。
+当前备份不是简单的目录镜像复制。程序会把备份数据写入 repository，每次备份生成一个 snapshot，普通文件内容进入 object store。恢复时选择 repository 中的 snapshot，再按恢复路径策略写入目标目录。
 
-当前已经支持：
+当前主要能力：
 
+- 新建、打开、重命名、删除 repository。
+- 仓库级加密配置和密码修改。
 - 多源目录备份。
-- 源路径规范化、去重、父子目录去重。
-- repository 初始化、打开、备份、恢复。
-- 仓库中心化 GUI：新建、打开、导入、置顶、归档和仓库切换。
-- 每个仓库独立的快照工作区：添加快照、导出仓库、选择快照恢复。
-- snapshot 列表读取、快照删除和未引用 object 清理。
-- 路径、扩展名、文件名、文件大小、修改时间筛选。
-- 三种恢复路径策略：`PreserveFullPath`、`PreserveRelativePath`、`Flatten`。
-- `Flatten` 冲突策略：`Error`、`Skip`、`Overwrite`、`Rename`。
-- 基础文件元数据记录与恢复策略。
-- repository 导出为 `.tar`，以及从 `.tar` 导入为 repository。
-- core 层和 Tauri command 层自动化测试。
-
-当前不再保留 legacy mirror backup，也就是单纯目录复制式备份。GUI 的备份、恢复、归档操作都围绕 repository 模型工作。
+- 源路径规范化、去重和父子包含路径去重。
+- snapshot 标题、创建时间、源路径和 entry 元数据记录。
+- snapshot 列表读取、恢复、删除。
+- 删除 snapshot 后清理不再被引用的 object。
+- 路径正则、文件大小和修改时间筛选。
+- `PreserveRelativePath`、`PreserveFullPath`、`Flatten` 三种恢复路径策略。
+- `Error`、`Skip`、`Overwrite`、`Rename` 四种冲突策略。
+- object 级 `none` / `zstd` 压缩。
+- object 级 AES-256-GCM 加密。
+- repository 导出为 `.tar`，以及从 `.tar` 安全导入。
+- 仓库中心化 React GUI。
+- Rust core、Tauri command 和前端状态测试。
 
 ## 2. 项目结构
 
 ```text
 BackupTool/
-├── src/                    # 前端界面、状态、API 和视图：React / TypeScript / HTML / CSS
-├── src-tauri/              # Tauri 桌面应用层：command、DTO、权限、窗口配置
+├── src/                    # React / TypeScript 前端
+├── src-tauri/              # Tauri 2 桌面壳与 command 层
 ├── crates/
 │   └── backup-core/        # 纯 Rust 备份核心库
-├── scripts/                # Windows 环境检查和开发辅助脚本
+├── scripts/                # Windows 环境检查和辅助脚本
 ├── docs/                   # 项目文档
-├── .agents/                # 开发规划和 agent 工作资料，不进入远程仓库
 ├── Cargo.toml              # Rust workspace
-├── package.json            # 前端与 Tauri CLI 依赖
+├── package.json            # 前端和 Tauri CLI 依赖
 ├── pnpm-lock.yaml          # 前端依赖锁定文件
 └── justfile                # 项目级任务入口
 ```
@@ -52,80 +53,92 @@ BackupTool/
 
 | 层次 | 路径 | 技术 | 职责 |
 | --- | --- | --- | --- |
-| GUI 层 | `src/` | React, TypeScript, HTML, CSS, Vite | 仓库侧栏、工作区路由、参数输入、snapshot 选择、结果展示 |
-| 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | 暴露 Tauri command、DTO 转换、路径校验、错误转换 |
-| 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、object store、恢复策略、tar 归档 |
-| 构建编排 | `justfile` | just | 统一组织安装、检查、测试、开发运行和构建 |
-| 环境脚本 | `scripts/` | PowerShell | 检查 Windows 开发依赖，或单独启动 Vite |
+| GUI 层 | `src/` | React, TypeScript, Vite, CSS | 仓库侧栏、工作区、表单、状态和结果展示 |
+| 桌面适配层 | `src-tauri/` | Rust, Tauri 2, serde | Tauri command、DTO 转换、路径校验、错误映射 |
+| 核心业务层 | `crates/backup-core/` | Rust | repository、snapshot、object、筛选、恢复、归档 |
+| 构建编排 | `justfile` | just | 统一组织依赖安装、检查、测试、开发运行和构建 |
+| 环境脚本 | `scripts/` | PowerShell | Windows 依赖检查和 Vite 辅助启动 |
+
+当前不再需要 CMake、C++ core、C ABI、MSBuild 或手写 linker 配置。
 
 ## 3. 依赖与构建工具
 
-系统工具：
+系统侧建议：
 
 - Windows 10/11 x64。
 - Git。
-- Node.js 22 LTS 或更新版本。
-- pnpm 11.7.0。
 - Rust stable MSVC toolchain。
-- just 1.55 或更新版本。
+- Node.js。
+- pnpm。
+- just。
+- WebView2 Runtime。
 
 前端依赖由 `pnpm` 管理：
 
+- `react` / `react-dom`：GUI 组件和渲染。
 - `@tauri-apps/api`：前端调用 Tauri command。
-- `@tauri-apps/plugin-dialog`：目录和文件选择对话框。
-- `@tauri-apps/plugin-store`：保存仓库列表、侧栏布局和非敏感工作区草稿。
-- `react` / `react-dom`：GUI 组件和渲染层。
-- `@tauri-apps/cli`：Tauri 开发运行和打包。
-- `@types/react` / `@types/react-dom`：React TypeScript 类型。
-- `@vitejs/plugin-react`：React/Vite 开发构建支持。
+- `@tauri-apps/plugin-dialog`：文件和目录选择对话框。
+- `@tauri-apps/plugin-store`：保存本机 UI 状态。
+- `lucide-react`：基础图标。
+- `vite` / `@vitejs/plugin-react`：开发服务器和前端构建。
 - `typescript`：类型检查。
-- `vite`：前端开发服务和静态资源构建。
-- `vitest`：前端状态模型测试。
+- `vitest`：前端状态测试。
+- `@tauri-apps/cli`：Tauri 开发运行和打包。
 
 Rust 依赖由 Cargo workspace 管理：
 
 - 根目录 `Cargo.toml` 声明 workspace。
-- `crates/backup-core` 是核心库，当前依赖 `tar` crate 实现跨平台 tar 打包和解包，依赖 `zstd` crate 实现 object 级 zstd 压缩，依赖 `aes-gcm` 和 `argon2` 实现 object payload 加密，依赖 `sha2` crate 计算 SHA-256 object id。
-- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`、`serde`、`tauri`、`tauri-plugin-dialog` 和 `tauri-plugin-store`。
+- `crates/backup-core` 是核心库。
+- `src-tauri` 是 Tauri 应用 crate，依赖 `backup-core`。
 
-当前项目不再需要 CMake、MSBuild、C ABI 或 C++ 编译链。
+`backup-core` 当前主要外部 crate：
 
-## 4. 架构设计
+- `regex`：路径筛选。
+- `sha2`：计算 SHA-256 内容 hash。
+- `zstd`：object payload 压缩和解压。
+- `aes-gcm`：AES-256-GCM payload 加密。
+- `argon2`：从用户密码派生密钥加密仓库主密钥。
+- `rand`：生成 salt、nonce 和仓库主密钥。
+- `hex`：编码二进制密钥材料元数据。
+- `tar`：repository 导出和导入。
 
-系统分为三层：
+## 4. 架构原则
+
+系统按三层组织：
 
 ```text
 GUI 层
-    负责输入、交互和展示
+    负责交互、表单、状态、展示
 
 Tauri command 层
-    负责桌面应用边界、DTO 转换和错误映射
+    负责桌面边界、DTO 转换、路径校验、错误字符串化
 
 backup-core 核心层
-    负责备份、恢复、筛选、仓库、快照、归档等核心业务
+    负责备份、恢复、仓库、快照、对象、压缩、加密和归档
 ```
 
-实际调用路径：
-
-```text
-src/main.tsx -> src/App.tsx -> src/api.ts
-    -> invoke("create_repository" / "open_repository" / "backup" / "restore"
-              / "list_snapshots" / "delete_snapshot" / "export_repository" / "import_repository")
-        -> src-tauri/src/commands.rs
-            -> crates/backup-core
-```
-
-分层原则：
+设计约束：
 
 - GUI 不实现备份算法。
-- Tauri command 不堆积复杂业务逻辑。
-- `backup-core` 不依赖 Tauri、Node.js 或 GUI。
-- 新业务能力优先在 `backup-core` 中形成可测试 API，再向 Tauri 和 GUI 暴露。
-- 前端交互可以影响 DTO 设计，但不应反向污染核心业务模型。
+- Tauri command 不承载核心业务，只做边界适配。
+- `backup-core` 不依赖 Tauri、React、Node.js 或 WebView。
+- 新能力优先在 `backup-core` 中形成可测试 API，再暴露到 command 和 GUI。
+- 密码不写入前端持久化状态。
+- repository 是磁盘数据格式，前端 Store 只是本机 UI 状态。
 
-## 5. Repository 设计
+典型调用路径：
 
-repository 是一个目录型备份仓库，磁盘结构为：
+```text
+src/App.tsx
+    -> src/api.ts
+        -> invoke("backup" / "restore" / "list_snapshots" / ...)
+            -> src-tauri/src/commands.rs
+                -> crates/backup-core/src/repository.rs
+```
+
+## 5. Repository 磁盘格式
+
+repository 是一个目录：
 
 ```text
 repository/
@@ -137,84 +150,227 @@ repository/
 
 各部分职责：
 
-- `repo.meta`：仓库标识和仓库级元数据文件，用于判断目录是否为合法 BackupTool repository，并记录显示名称、仓库加密算法和密码校验信息。仓库名称是显示名称，不要求与磁盘目录名一致；重命名仓库只修改 `repo.meta`，不移动或改名目录。
-- `objects/`：保存普通文件内容。对象名为原始文件内容的 SHA-256 hash 加存储加密状态后缀：`<content-hash>-plain` 或 `<content-hash>-encrypted`。相同内容且加密状态相同的文件可以复用，明文和密文 object 可以同时存在。
-- `snapshots/`：保存每次备份生成的 snapshot 文件，例如 `<seconds>-<nanoseconds>-<sequence>.snapshot`。
-- `indexes/`：当前已创建，主要为后续索引能力预留。
+- `repo.meta`：仓库元数据。保存显示名、仓库加密算法、KDF 参数、wrapped repository master key 等信息。仓库显示名不要求与磁盘目录名一致。
+- `objects/`：文件内容对象。对象文件名是 `<sha256>-plain` 或 `<sha256>-encrypted`。
+- `snapshots/`：每次备份生成的 snapshot 文件，格式为 `<snapshot-id>.snapshot`。
+- `indexes/`：预留目录，当前主要用于保持仓库结构稳定。
 
-snapshot id 当前由创建时间和同一时间点下的序号组成：
+repository 的合法性通过 `repo.meta` 和必要目录判断。命令层在备份时不会把数据写入“已有但不是 repository 的非空目录”，避免和普通文件夹混合。
+
+## 6. Snapshot 模型
+
+snapshot id 格式：
 
 ```text
 <unix_seconds>-<nanoseconds_9_digits>-<sequence_3_digits>
 ```
 
-snapshot 文件内部使用文本格式，文件头为：
+snapshot 文件路径：
+
+```text
+snapshots/<snapshot-id>.snapshot
+```
+
+snapshot 文件头：
 
 ```text
 backup-tool snapshot v1
 ```
 
-文件内显式记录：
+snapshot 文件记录：
 
-- `snapshot`：snapshot id。
-- `created`：创建时间的秒、纳秒和 sequence。
-- `title`：本次备份的可选标题，标题为空时表示未设置。
-- `source`：备份源路径及恢复时使用的源根名称。
-- `entry`：目录、文件、符号链接或其他条目的相对路径、大小、时间、object id 和元数据。
+- snapshot id。
+- 创建时间的秒、纳秒和 sequence。
+- 可选标题。
+- 每个源目录的绝对路径和恢复根名称。
+- 每个 entry 的类型、相对路径、大小、修改时间、object id 和元数据。
 
-一次备份的大致流程：
+entry 类型包括：
 
-```text
-用户选择一个或多个源目录
-    -> 源路径规范化和去重
-    -> 扫描目录树
-    -> BackupFilter 使用路径正则判断普通文件是否进入备份
-    -> 根据本次 snapshot 是否加密决定 object-id 后缀为 -plain 或 -encrypted
-    -> 文件内容写入 objects/
-    -> snapshots/<snapshot-id>.snapshot 记录结构、源路径、标题、创建时间和对象引用
-    -> 返回 snapshot id、文件数、字节数
-```
+- `Directory`
+- `File`
+- `Symlink`
+- `Other`
 
-一次恢复的大致流程：
+当前重点支持普通目录和普通文件。元数据保存包括大小、访问时间、创建时间、修改时间、只读状态，以及 Windows / POSIX 平台相关基础字段。恢复时默认使用 `BestEffort`，即尽量恢复数据和可支持元数据；不支持的元数据以警告方式处理。
+
+## 7. 多源备份
+
+`backup` command 接收多个源目录：
 
 ```text
-用户从侧栏选择 repository
-    -> list_snapshots 读取可用 snapshot
-    -> 用户选择 snapshot 和恢复策略
-    -> 读取 snapshot 文件
-    -> 从 objects/ 读取对象内容
-    -> 按路径策略写入恢复目标目录
+backup(sources, destination, filter, compressionAlgorithm, snapshotTitle, encryptSnapshot, encryptionPassword)
 ```
 
-## 6. 归档设计
+核心层会先规范化源路径：
 
-当前支持将整个 repository 导出为单个 `.tar` 文件，也支持从 `.tar` 导入为可打开的 repository。
+1. 转为绝对路径。
+2. 尽量使用可访问路径的 canonical form。
+3. 规范化 `.` 和 `..`。
+4. 排序。
+5. 去重。
+6. 如果父目录和子目录同时存在，保留父目录，移除多余子目录。
 
-归档能力定位为 repository 的导出/导入格式，而不是替代 repository 本身：
+被移除的重复或子路径会进入 `ignored_sources`，由 GUI 显示给用户。
+
+多源恢复时，`PreserveRelativePath` 默认使用每个源目录的恢复根名称隔离不同源。恢复根名称优先来自源目录顶层名；如果发生冲突，复用 `Flatten` 的冲突策略处理名称。
+
+## 8. Object 模型
+
+object id 当前格式：
+
+```text
+<content_sha256>-plain
+<content_sha256>-encrypted
+```
+
+其中：
+
+- `content_sha256` 只由原始文件数据计算。
+- `plain` 表示 object payload 未加密。
+- `encrypted` 表示 object payload 使用仓库主密钥加密。
+
+这样可以保证：
+
+- 同一明文内容在不同压缩算法下仍有相同内容 hash。
+- 同一明文内容的明文 object 和加密 object 可以同时存在。
+- 一个加密快照不会把其他引用同内容明文 object 的快照变成需要密码。
+
+object 文件是自描述格式，头部为文本，payload 为二进制：
+
+```text
+backup-tool object v1
+compression    none|zstd
+encryption     none|aes-256-gcm
+key_id         <repository key id or empty>
+nonce          <hex nonce or empty>
+original_size  <u64>
+payload_size   <u64>
+
+<payload bytes>
+```
+
+写入流程：
+
+```text
+raw bytes
+    -> optional zstd compression
+        -> optional AES-256-GCM encryption
+            -> object header + payload
+```
+
+读取流程：
+
+```text
+object header + payload
+    -> optional AES-256-GCM decryption
+        -> optional zstd decompression
+            -> raw bytes
+```
+
+压缩和加密都只处理 payload，不处理 object header。
+
+## 9. 加密模型
+
+当前加密是 object payload 级别，不是整个 repository 或 tar 文件级别。
+
+仓库加密配置位于 `repo.meta`：
+
+- `EncryptionAlgorithm::None`：仓库不配置加密。
+- `EncryptionAlgorithm::Aes256Gcm`：仓库配置 AES-256-GCM object 加密能力。
+
+加密仓库创建时会生成随机 repository master key。用户密码通过 Argon2id 派生 key encryption key，用于封装 master key。`repo.meta` 保存 salt、KDF 参数、nonce、wrapped master key 和 key id，但不保存明文密码或明文 master key。
+
+添加 snapshot 时：
+
+- 未勾选加密：写入 `-plain` object，不需要密码。
+- 勾选加密：需要仓库已经配置加密，并且需要用户密码解封装 master key，写入 `-encrypted` object。
+
+恢复 snapshot 时：
+
+- 如果 snapshot 不引用加密 object，不需要密码。
+- 如果 snapshot 引用加密 object，需要提供正确密码。
+
+修改仓库密码时，只重新封装 repository master key，不重写 object，不改变 snapshot，不改变 object id。
+
+## 10. 筛选模型
+
+`BackupFilter` 支持：
+
+- `path_regex`：匹配规范化后的相对路径，路径分隔符统一为 `/`。
+- `min_size` / `max_size`：文件大小范围。
+- `modified_after` / `modified_before`：修改时间范围，使用 Unix seconds。
+
+筛选只决定普通文件是否进入 snapshot。目录 entry 仍可能被记录，用于恢复目录结构。非法正则会在备份开始前返回错误。
+
+## 11. 恢复模型
+
+恢复路径策略：
+
+- `PreserveRelativePath`：默认策略。单源时恢复源目录内相对结构；多源时用源恢复根名称隔离。
+- `PreserveFullPath`：把原绝对路径编码进目标目录，例如 Windows 盘符会转换为安全路径组件。
+- `Flatten`：只把文件恢复到目标根目录，不恢复原始目录层级。
+
+冲突策略：
+
+- `Error`：遇到目标路径已存在即失败。
+- `Skip`：跳过冲突文件。
+- `Overwrite`：覆盖目标文件。
+- `Rename`：自动改名，例如 `config.json`、`config (1).json`。
+
+恢复元数据策略当前默认 `BestEffort`。底层还保留 `Strict` 和 `DataOnly` 模型，便于后续扩展 GUI 或命令层选项。
+
+## 12. Tar 导入导出
+
+当前支持 repository 级 tar 归档：
 
 ```text
 repository/
-    -> export_repository
+    -> export_repository(...)
         -> repository.tar
 
 repository.tar
-    -> import_repository
+    -> import_repository(...)
         -> repository/
-            -> Open Repository
-            -> Restore snapshot
 ```
 
-当前只支持未压缩 tar：
+设计点：
 
-- 不实现 `.tar.gz`、`.zip`、压缩、加密或分卷。
-- 使用 Rust `tar` crate，不调用系统 `tar` 命令。
-- tar 内部只保存相对路径。
-- 导出内容限定为 `repo.meta`、`objects/`、`snapshots/`、`indexes/`。
-- 如果导出目标 `.tar` 放在 repository 根目录下，不会被作为仓库内容打入 tar。
-- 导入目标目录必须不存在或为空，避免和已有文件混合。
-- 导入时拒绝绝对路径、`..`、symlink 等非常规 tar entry，避免不安全解包。
+- 归档对象是完整 repository，不是单个 snapshot，也不是用户原始源目录。
+- 当前唯一算法是 `tar`，接口保留 algorithm 参数。
+- 使用 Rust `tar` crate，不依赖系统 tar 命令。
+- tar 内部路径全部是相对路径。
+- 导出内容包含 `repo.meta`、`objects/`、`snapshots/`、`indexes/`。
+- 如果输出 tar 文件位于 repository 内部，导出时会跳过它，避免递归打包自身。
+- 导入目标目录必须不存在或为空。
+- 导入时拒绝绝对路径、`..`、symlink 等非常规 entry，避免不安全解包。
 
-对应 Tauri command：
+tar 导出会保留加密 object；迁移后恢复加密 snapshot 仍需要正确密码。
+
+## 13. GUI 设计
+
+前端位于 `src/`，当前使用 React 和原生 CSS。
+
+主要界面结构：
+
+- 自定义标题栏：保留窗口拖动和窗口控制按钮，并提供 sidebar 折叠按钮。
+- 左侧 sidebar：新建、打开、导入仓库；显示置顶仓库和普通仓库列表。
+- 仓库列表：支持置顶、取消置顶、归档隐藏、拖拽排序。
+- 右侧 session/workspace：按当前选中 repository 展示快照工作区。
+- 仓库工作区：显示仓库名、快照列表、刷新、添加快照、导出仓库。
+- 功能弹窗：添加快照、导出仓库、恢复快照使用居中 modal。
+- 设置页面：支持仓库显示名修改、仓库密码相关操作和删除仓库。
+
+前端状态：
+
+- 使用 `@tauri-apps/plugin-store` 保存本机 UI 状态。
+- 保存内容包括侧栏宽度、仓库列表、置顶状态、归档状态、顺序、当前仓库、各仓库草稿。
+- 密码和解密口令不写入 Store。
+- repository 数据本身不依赖前端 Store；Store 损坏不应破坏磁盘仓库。
+
+## 14. Tauri Command 接口
+
+主要 command 位于 `src-tauri/src/commands.rs`：
 
 ```text
 create_repository(parent_path, name, encryption_algorithm?, encryption_password?)
@@ -223,375 +379,94 @@ rename_repository(repository_path, display_name)
 unlock_repository(repository_path, encryption_password)
 change_repository_password(repository_path, old_password, new_password)
 delete_repository(repository_path, encryption_password?)
+
+backup(sources, destination, filter?, compression_algorithm?, snapshot_title?, encrypt_snapshot?, encryption_password?)
+restore(backup_path, snapshot_id, destination, path_strategy?, flatten_conflict_strategy?, decryption_password?)
+list_snapshots(repository_path)
 delete_snapshot(repository_path, snapshot_id, encryption_password?)
+
 export_repository(repository_path, archive_path, algorithm?)
 import_repository(archive_path, destination, algorithm?)
 ```
 
-`algorithm` 当前默认为 `tar`，未知算法会返回错误。
+DTO 位于 `src-tauri/src/dto.rs`。跨 Tauri 边界字段使用 `camelCase`，进入 core 前转换为 Rust 内部类型。
 
-## 7. 关键类型与关系
+## 15. 测试分布
 
-核心类型主要位于 `crates/backup-core/src/lib.rs` 和 `crates/backup-core/src/repository.rs`。
-
-```text
-Repository
-├── init(root)
-├── init_with_options(root, display_name, encryption_algorithm, encryption_password)
-├── open(root)
-├── metadata() -> RepositoryMetadata
-├── set_display_name(display_name) -> RepositoryMetadata
-├── verify_encryption_password(password)
-├── writer() -> RepositoryWriter
-├── reader() -> RepositoryReader
-├── export_archive(output_file, ArchiveAlgorithm)
-└── import_archive(archive_file, destination, ArchiveAlgorithm)
-
-RepositoryWriter
-├── backup_many(sources, filter) -> Snapshot
-└── delete_snapshot(snapshot_id) -> SnapshotDeleteResult
-
-RepositoryReader
-├── list_snapshots() -> Vec<SnapshotInfo>
-├── read_snapshot(snapshot_id) -> SnapshotFile
-└── restore_with_options(snapshot_id, destination, RestoreOptions)
-
-SnapshotFile
-├── snapshot_id: SnapshotId
-├── created_unix_seconds
-├── created_nanoseconds
-├── sequence
-├── title
-├── sources: Vec<SourceInfo>
-└── entries: Vec<SnapshotEntry>
-
-SnapshotEntry
-├── source_index
-├── relative_path
-├── kind
-├── size
-├── modified_unix_seconds
-├── object_id
-└── metadata
-
-ObjectStore
-├── write_object(bytes) -> ObjectId
-└── read_object(object_id) -> Vec<u8>
-
-RepositoryMetadata
-├── display_name
-├── encryption_algorithm
-└── password verifier metadata
-```
-
-恢复相关策略：
+当前测试主要分三类：
 
 ```text
-RestoreOptions
-├── strategy: RestoreStrategy
-├── path_strategy: RestorePathStrategy
-└── flatten_conflict_strategy: FlattenConflictStrategy
+crates/backup-core/tests/repository.rs
+    core 层 repository、snapshot、object、压缩、加密、恢复、tar 测试
+
+src-tauri/src/commands_tests.rs
+    Tauri command 层 DTO、路径校验、命令行为和错误映射测试
+
+src/state.test.ts
+    前端仓库状态、排序、置顶、归档、草稿和路由回退测试
 ```
 
-Tauri DTO 位于 `src-tauri/src/dto.rs`：
+常用验证命令：
 
-- `RepositoryInfoDto`：仓库规范化路径、显示名称和仓库加密算法。
-- `BackupFilterDto`：前端筛选条件。当前筛选主入口是 `path_regex`，匹配使用 `/` 归一化后的源内相对路径；空正则表示不过滤。
-- `BackupResultDto`：备份结果。
-- `RestoreResultDto`：恢复结果。
-- `SnapshotInfoDto`：snapshot 列表展示数据。
-- `SnapshotDeleteResultDto`：快照删除和 object 回收结果。
-- `ArchiveResultDto`：仓库导出/导入结果。
+```powershell
+just check
+just test
+```
 
-## 8. GUI 功能入口
+`just check` 包含：
 
-当前 GUI 以 repository 为根组织：
+```powershell
+.\node_modules\.bin\tsc.cmd
+cargo check --workspace
+```
 
-- 左侧仓库侧栏：新建、打开、导入、置顶、归档和切换仓库；侧栏宽度可以拖动调整。
-- 仓库主页：显示仓库信息、设置入口、添加快照、导出仓库和快照列表。
-- Repository Settings：修改仓库显示名称、解锁加密仓库、修改加密仓库密码、删除仓库。删除仓库会从磁盘删除整个 repository 目录；加密仓库删除时必须输入正确密码。
-- `Add Snapshot` 页面：固定当前仓库，包含多源目录、压缩、是否加密本次 snapshot、标题和高级路径正则筛选。加密算法不在这里切换，而是来自仓库创建时写入 `repo.meta` 的仓库配置。
-- `Export Repository` 页面：固定当前仓库，导出为 tar。
-- `Restore Snapshot` 页面：固定当前仓库和 snapshot，只选择恢复目录、路径策略和冲突策略；只有当前 snapshot 含有加密 object 时才显示密码输入框。
+`just test` 包含：
 
-GUI 通过 React 组件组织界面，通过 `src/api.ts` 调用 Tauri command，不直接操作 repository 文件结构。侧栏和工作区草稿由 `src/state.ts` 使用 Tauri Store 持久化；加密密码只保存在当前前端进程内存中，不写入 Store 或明文写入 repository。
+```powershell
+pnpm.cmd test
+cargo test --workspace
+```
 
-## 9. 环境配置
+## 16. 构建和运行
 
-首次配置：
+首次安装依赖：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1
 just setup
 ```
 
-只检查环境、不安装：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-windows.ps1 -CheckOnly
-```
-
-脚本会检查或准备：
-
-- Git。
-- Rust stable MSVC toolchain。
-- Node.js。
-- pnpm 11.7.0。
-- just。
-- 项目 Node 依赖。
-
-如果 PowerShell 执行策略阻止 `pnpm.ps1`，使用 `pnpm.cmd`。本项目的 `justfile` 已统一调用 `.cmd` 入口。
-
-## 10. 构建、运行与测试
-
-列出所有任务：
-
-```powershell
-just
-```
-
-安装前端依赖：
-
-```powershell
-just setup
-```
-
-检查前端和 Rust workspace：
-
-```powershell
-just check
-```
-
-内部执行：
-
-```text
-tsc.cmd
-cargo check --workspace
-```
-
-运行测试：
-
-```powershell
-just test
-```
-
-内部执行：
-
-```text
-pnpm.cmd test
-cargo test --workspace
-```
-
-启动开发模式：
+开发运行：
 
 ```powershell
 just dev
 ```
 
-`just dev` 会先启动 Vite，再启动 Tauri。Vite 服务地址为：
-
-```text
-http://127.0.0.1:1420
-```
-
-只启动 Vite：
-
-```powershell
-just vite
-```
-
-构建 release 应用和安装包：
+构建 release：
 
 ```powershell
 just build
 ```
 
-构建并运行 release 可执行文件：
-
-```powershell
-just run
-```
-
-清理构建产物：
-
-```powershell
-just clean
-```
-
-release 可执行文件通常位于：
+构建后可执行文件：
 
 ```text
 target/release/backup-tool.exe
 ```
 
-安装包通常位于：
+完整环境配置见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-```text
-target/release/bundle/
-```
+## 17. 后续扩展方向
 
-## 11. 测试覆盖
+当前架构为后续能力预留了几个方向：
 
-当前测试分为两层。
+- 更完整的文件系统 provider，包括特殊文件、符号链接和权限恢复策略。
+- 更丰富的 snapshot 管理，例如标签、搜索、差异比较和保留策略。
+- object 垃圾回收和仓库一致性检查。
+- 更多归档算法，例如自定义 pack、zip、压缩 tar。
+- 更细粒度的压缩参数和压缩率统计。
+- 加密元数据保护，例如加密路径和 snapshot 文件。
+- 定时备份和实时监听备份。
+- 更完善的 GUI 主题、图标、交互和无障碍支持。
 
-`backup-core` 测试覆盖：
-
-- repository 目录结构创建。
-- snapshot 文件写入和读取。
-- 连续备份生成不同 snapshot。
-- 多源备份、重复源去重、父子源去重。
-- 按 snapshot 恢复历史版本。
-- 路径筛选和元数据恢复策略。
-- 三种恢复路径策略。
-- `Flatten` 冲突策略。
-- repository 导出 tar、导入 tar、导入后恢复。
-- 非 repository 导出失败。
-- 导入到非空目录失败。
-- 删除快照时保留共享 object，清理未引用 object，并报告清理 warning。
-
-Tauri command 层测试覆盖：
-
-- `backup` command。
-- `restore` command。
-- `create_repository` 和 `open_repository` command。
-- `list_snapshots` command。
-- `delete_snapshot` command。
-- `export_repository` command。
-- `import_repository` command。
-- DTO 转换和错误字符串返回。
-- 未知归档算法错误。
-- 非空导入目标错误。
-
-前端状态测试覆盖：
-
-- 仓库路径去重、归档后重新打开和置顶排序。
-- 不同仓库的工作区草稿隔离。
-- 已删除 snapshot 的恢复页面回退到仓库主页。
-- 密码不会进入持久化状态。
-
-提交前建议至少运行：
-
-```powershell
-just check
-just test
-```
-
-最近一次验证结果：
-
-```text
-just check 通过
-just test 通过
-```
-
-## 12. 开发方法
-
-新增功能建议按以下顺序推进：
-
-```text
-1. 在 backup-core 中设计核心类型和业务逻辑
-2. 为 backup-core 添加测试
-3. 在 src-tauri 中添加 DTO 和 command
-4. 为 command 层添加测试
-5. 在 src/ 中做最小 GUI 集成
-6. 运行 just check 和 just test
-```
-
-开发时应避免：
-
-- 在 TypeScript 中实现核心备份逻辑。
-- 在 Tauri command 中堆积复杂业务流程。
-- 为临时界面需求破坏核心库模型。
-- 在核心能力不稳定前过早做复杂 GUI。
-
-## 13. Object 级压缩与加密设计
-
-当前压缩能力作用于 repository 的 `objects/`，粒度是单个 object，而不是整个仓库目录或整个 tar 包。备份时可以选择压缩算法：
-
-- `none`：默认值，不压缩 payload。
-- `zstd`：使用 zstd 压缩 payload。
-
-当前加密能力同样作用于单个 object 的 payload，而不是整个仓库目录或 tar 包。仓库创建时选择仓库加密算法；每次添加 snapshot 时只选择本次 snapshot 是否加密：
-
-- `none`：默认值，不加密 payload。
-- `aes-256-gcm`：使用 AES-256-GCM 加密 payload，并提供认证校验。
-
-用户通过密码启用 AES-256-GCM。当前实现使用信封加密：
-
-```text
-用户密码
-    -> Argon2id(password, salt)
-    -> KEK
-    -> 解包 repository_master_key
-    -> repository_master_key 加密/解密 object payload
-```
-
-`repo.meta` 保存仓库显示名称、仓库加密算法、密钥格式版本、KDF 信息、salt、master-key wrapping algorithm、wrapping nonce、wrapped repository master key 和 key id。它不保存明文密码、KEK 或明文 repository master key。
-
-修改仓库密码时只重新包装同一个 `repository_master_key`：不重写 object，不修改 object id，不重写 snapshot。旧密码错误时修改失败；新密码生效后旧密码不能再解包 master key。
-
-`content-hash` 始终由原始文件内容计算，不由 object header、压缩后的 payload、加密后的 payload、salt 或 nonce 计算。当前实现使用 SHA-256，得到 64 字符小写十六进制 hash。
-
-物理 `object-id` 在 content hash 后追加加密状态：
-
-```text
-<content-hash>-plain
-<content-hash>-encrypted
-```
-
-因此，相同内容的未加密 object 和加密 object 可以同时存在，不会因后续备份改变旧 snapshot 是否需要密码。相同原始内容且具有相同加密状态的文件仍映射到同一个 object，实现内容去重；例如两个相同内容的文件都选择加密时会共享同一个 `<content-hash>-encrypted` object。压缩算法不进入 object id。
-
-object 物理路径统一为：
-
-```text
-objects/<object-id>
-```
-
-object 文件内部使用文本 header + 二进制 payload：
-
-```text
-backup-tool object v1
-compression    none|zstd
-encryption     none|aes-256-gcm
-key_id         <repository key id>
-nonce          <hex>
-original_size  <u64>
-payload_size   <u64>
-
-<payload bytes>
-```
-
-压缩算法和加密算法都记录在 object header 中，不记录在 snapshot entry 中。压缩和加密只处理空行之后的 payload bytes，不处理 header。写入顺序是：
-
-```text
-原始文件内容
-    -> compression none|zstd
-    -> encryption none|aes-256-gcm
-    -> object payload
-```
-
-读取顺序相反：
-
-```text
-object payload
-    -> decryption none|aes-256-gcm
-    -> decompression none|zstd
-    -> 原始文件内容
-```
-
-若同一 `object-id` 已存在但 compression 与本次备份选择不同，会根据本次参数重写该加密状态下的 object。明文与密文使用不同 object id，彼此不会覆盖。对于已存在的加密 object，写入时会先用用户密码解包仓库 master key，再验证其内容；密码不匹配时返回明确错误，不会覆盖旧 object。
-
-恢复流程中用户不需要选择压缩算法或加密算法，算法从 object header 读取；如果 object 已加密，则必须提供正确密码：
-
-```text
-snapshot entry
-    -> object_id
-    -> ObjectStore 读取 objects/<object-id>
-    -> 解析 object header 中的 encryption 和 compression
-    -> 如果是 aes-256-gcm 则先用密码解包 repository_master_key，再解密 payload
-    -> 如果是 zstd 则解压 payload
-    -> 写回原始文件内容
-```
-
-tar 导出/导入会保留 `objects/` 下的自描述 object 文件，因此压缩或加密 repository 可以作为 tar 文件迁移到其他系统后再恢复；加密 object 迁移后仍需要同一密码才能恢复。
-
-后续规划以 `.agents/PLAN.md` 为准。当前主线应继续围绕 repository、snapshot、object store、archive、compression、encryption 等核心模型演进。压缩已经具备 object 级 zstd 第一版，后续可继续扩展压缩率统计、压缩等级配置和更多算法。
+这些扩展应继续遵循当前分层：先在 `backup-core` 形成可测试模型，再通过 Tauri command 暴露，最后接入 GUI。

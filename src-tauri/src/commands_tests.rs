@@ -719,6 +719,88 @@ fn delete_encrypted_repository_requires_password() {
 }
 
 #[test]
+fn encrypted_repository_stays_encrypted_after_plain_snapshot_restore_and_delete() {
+    let root = TestDir::new("tauri_encryption_state_regression");
+    let first_source = root.path.join("source-one");
+    let second_source = root.path.join("source-two");
+    let encrypted_source = root.path.join("source-three");
+    let repository_dir = root.path.join("repository");
+    let restore_dir = root.path.join("restore");
+    fs::create_dir_all(&first_source).unwrap();
+    fs::create_dir_all(&second_source).unwrap();
+    fs::create_dir_all(&encrypted_source).unwrap();
+    fs::write(first_source.join("same.txt"), "same content").unwrap();
+    fs::write(second_source.join("same.txt"), "same content").unwrap();
+    fs::write(encrypted_source.join("secret.txt"), "secret content").unwrap();
+    create_repository(
+        root.path.to_string_lossy().into_owned(),
+        "repository".to_string(),
+        Some("aes-256-gcm".to_string()),
+        Some("password".to_string()),
+    )
+    .unwrap();
+
+    backup(
+        vec![first_source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+    )
+    .unwrap();
+    let second = backup(
+        vec![second_source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+    )
+    .unwrap();
+    restore(
+        repository_dir.to_string_lossy().into_owned(),
+        second.snapshot_id.clone(),
+        restore_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    delete_snapshot(
+        repository_dir.to_string_lossy().into_owned(),
+        second.snapshot_id,
+        None,
+    )
+    .unwrap();
+
+    let encrypted = backup(
+        vec![encrypted_source.to_string_lossy().into_owned()],
+        repository_dir.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        Some(true),
+        Some("password".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        open_repository(repository_dir.to_string_lossy().into_owned())
+            .unwrap()
+            .encryption_algorithm,
+        "aes-256-gcm"
+    );
+    assert!(
+        list_snapshots(repository_dir.to_string_lossy().into_owned())
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.id == encrypted.snapshot_id && snapshot.has_encrypted_objects)
+    );
+}
+
+#[test]
 fn export_and_import_repository_commands_round_trip_tar() {
     let root = TestDir::new("tauri_archive_round_trip");
     let source = root.path.join("source");

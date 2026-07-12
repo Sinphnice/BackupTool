@@ -14,6 +14,10 @@ function repository(path: string, name: string) {
   return { path, name, encryptionAlgorithm: "none" as const };
 }
 
+function encryptedRepository(path: string, name: string) {
+  return { path, name, encryptionAlgorithm: "aes-256-gcm" as const };
+}
+
 describe("repository UI state", () => {
   it("deduplicates canonical Windows paths and unarchives reopened repositories", () => {
     const state = createState();
@@ -25,6 +29,16 @@ describe("repository UI state", () => {
     expect(state.repositories).toHaveLength(1);
     expect(reopened.archived).toBe(false);
     expect(state.activeRepositoryPath).toBe(reopened.path);
+  });
+
+  it("updates encryption metadata when reopening an existing repository record", () => {
+    const state = createState();
+    upsertRepository(state, repository("C:\\Backups\\Repo", "Repo"));
+
+    const reopened = upsertRepository(state, encryptedRepository("c:\\backups\\repo", "Repo"));
+
+    expect(state.repositories).toHaveLength(1);
+    expect(reopened.encryptionAlgorithm).toBe("aes-256-gcm");
   });
 
   it("separates pinned repositories from the regular repository list", () => {
