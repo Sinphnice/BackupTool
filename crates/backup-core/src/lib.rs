@@ -1,9 +1,9 @@
+use regex::Regex;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use regex::Regex;
 
 pub mod filesystem;
 pub mod repository;
@@ -102,6 +102,7 @@ pub type BackupCoreResult<T> = Result<T, BackupError>;
 #[derive(Debug, Clone, Default)]
 pub struct BackupFilter {
     pub path_regex: Option<String>,
+    pub owner: Option<String>,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
     pub modified_after: Option<i64>,
@@ -114,10 +115,24 @@ impl BackupFilter {
     }
 
     /// 判断一个普通文件是否应该被复制到备份输出目录。
-    pub fn allows(&self, relative_path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<bool> {
+    pub fn allows(
+        &self,
+        relative_path: &Path,
+        path: &Path,
+        metadata: &fs::Metadata,
+    ) -> BackupCoreResult<bool> {
         let path_text = normalize_path_text(relative_path);
         if let Some(regex) = self.compiled_path_regex()? {
             if !regex.is_match(&path_text) {
+                return Ok(false);
+            }
+        }
+
+        if let Some(owner_filter) = normalized_filter_text(self.owner.as_deref()) {
+            let Some(owner) = file_owner_text(path, metadata)? else {
+                return Ok(false);
+            };
+            if !owner_matches(&owner, owner_filter) {
                 return Ok(false);
             }
         }
@@ -156,9 +171,9 @@ impl BackupFilter {
         else {
             return Ok(None);
         };
-        Regex::new(pattern).map(Some).map_err(|error| {
-            BackupError::InvalidRepository(format!("invalid path regex: {error}"))
-        })
+        Regex::new(pattern)
+            .map(Some)
+            .map_err(|error| BackupError::InvalidRepository(format!("invalid path regex: {error}")))
     }
 }
 
@@ -168,6 +183,145 @@ fn normalize_path_text(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn normalized_filter_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn owner_matches(owner: &str, filter: &str) -> bool {
+    let owner = owner.trim();
+    let filter = filter.trim();
+    if owner.eq_ignore_ascii_case(filter) {
+        return true;
+    }
+    owner
+        .rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|account| account.eq_ignore_ascii_case(filter))
+}
+
+#[cfg(windows)]
+fn file_owner_text(path: &Path, _metadata: &fs::Metadata) -> BackupCoreResult<Option<String>> {
+    windows_file_owner_text(path)
+}
+
+#[cfg(unix)]
+fn file_owner_text(_path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(Some(metadata.uid().to_string()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_owner_text(_path: &Path, _metadata: &fs::Metadata) -> BackupCoreResult<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn windows_file_owner_text(path: &Path) -> BackupCoreResult<Option<String>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+
+    let mut path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut owner_sid: PSID = null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    let result = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return Err(BackupError::InvalidRepository(format!(
+            "failed to read file owner for {}: Windows error {result}",
+            path.display()
+        )));
+    }
+
+    let owner = lookup_windows_account(owner_sid);
+    if !security_descriptor.is_null() {
+        unsafe {
+            let _ = LocalFree(security_descriptor.cast());
+        }
+    }
+    owner
+}
+
+#[cfg(windows)]
+fn lookup_windows_account(
+    sid: windows_sys::Win32::Security::PSID,
+) -> BackupCoreResult<Option<String>> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+
+    if sid.is_null() {
+        return Ok(None);
+    }
+
+    let mut name_len = 0;
+    let mut domain_len = 0;
+    let mut sid_type: SID_NAME_USE = 0;
+    unsafe {
+        LookupAccountSidW(
+            null_mut(),
+            sid,
+            null_mut(),
+            &mut name_len,
+            null_mut(),
+            &mut domain_len,
+            &mut sid_type,
+        );
+    }
+    if name_len == 0 {
+        return Err(BackupError::InvalidRepository(
+            "failed to read owner account name".into(),
+        ));
+    }
+
+    let mut name = vec![0u16; name_len as usize];
+    let mut domain = vec![0u16; domain_len as usize];
+    let result = unsafe {
+        LookupAccountSidW(
+            null_mut(),
+            sid,
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut sid_type,
+        )
+    };
+    if result == 0 {
+        return Err(BackupError::InvalidRepository(
+            "failed to read owner account name".into(),
+        ));
+    }
+    name.truncate(name_len as usize);
+    domain.truncate(domain_len as usize);
+    let account = String::from_utf16_lossy(&name)
+        .trim_end_matches('\0')
+        .to_string();
+    let domain = String::from_utf16_lossy(&domain)
+        .trim_end_matches('\0')
+        .to_string();
+    if domain.is_empty() {
+        Ok(Some(account))
+    } else {
+        Ok(Some(format!("{domain}\\{account}")))
+    }
 }
 
 fn modified_unix_seconds(path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<i64> {

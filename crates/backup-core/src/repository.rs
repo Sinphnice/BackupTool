@@ -1861,7 +1861,7 @@ fn scan_into_snapshot_file(
 
         let metadata = fs::metadata(&path)?;
         if file_entry.file_type != FileKind::File
-            || !filter.allows(&file_entry.relative_path, &metadata)?
+            || !filter.allows(&file_entry.relative_path, &path, &metadata)?
         {
             continue;
         }

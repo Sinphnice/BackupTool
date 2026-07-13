@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupFilterDto {
     pub(crate) path_regex: Option<String>,
+    pub(crate) owner: Option<String>,
     pub(crate) min_size: Option<u64>,
     pub(crate) max_size: Option<u64>,
     pub(crate) modified_after: Option<i64>,
@@ -152,6 +153,7 @@ impl From<BackupFilterDto> for BackupFilter {
     fn from(value: BackupFilterDto) -> Self {
         Self {
             path_regex: value.path_regex,
+            owner: value.owner,
             min_size: value.min_size,
             max_size: value.max_size,
             modified_after: value.modified_after,

@@ -495,6 +495,36 @@ fn repository_backup_applies_filter_before_storing_objects() {
 }
 
 #[test]
+fn repository_backup_owner_filter_excludes_non_matching_owner() {
+    let root = TestDir::new("repo_owner_filter");
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file.txt"), "owned").unwrap();
+
+    let snapshot = repository
+        .writer()
+        .backup(
+            &source,
+            &BackupFilter {
+                owner: Some("__backup_tool_owner_that_should_not_exist__".to_string()),
+                ..BackupFilter::default()
+            },
+        )
+        .unwrap();
+
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+    assert_eq!(
+        snapshot_file
+            .entries
+            .iter()
+            .filter(|entry| entry.object_id.is_some())
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn missing_snapshot_returns_error() {
     let root = TestDir::new("missing_snapshot");
     let repository = Repository::init(root.path.join("repository")).unwrap();

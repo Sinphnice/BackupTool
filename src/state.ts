@@ -10,12 +10,14 @@ import type {
 const STORE_PATH = "backup-tool-ui.json";
 const STORE_KEY = "appState";
 const DEFAULT_SIDEBAR_WIDTH = 260;
+const DEFAULT_WINDOW_SIZE = { width: 1600, height: 1200 };
 let storePromise: Promise<Store> | undefined;
 let saveTimer: number | undefined;
 
 function blankFilter() {
   return {
     pathRegex: "",
+    owner: "",
     minSize: "",
     maxSize: "",
     modifiedAfter: "",
@@ -43,6 +45,7 @@ export function createState(): AppState {
   return {
     version: 1,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+    windowSize: DEFAULT_WINDOW_SIZE,
     sidebarCollapsed: false,
     sidebarSections: {
       pinnedExpanded: true,
@@ -97,6 +100,7 @@ function workspaceValue(value: unknown): RepositoryWorkspace {
     filtersOpen: value.filtersOpen === true,
     filter: {
       pathRegex: stringValue(filter.pathRegex),
+      owner: stringValue(filter.owner),
       minSize: stringValue(filter.minSize),
       maxSize: stringValue(filter.maxSize),
       modifiedAfter: stringValue(filter.modifiedAfter),
@@ -142,6 +146,7 @@ function sanitizeState(value: unknown): AppState {
       typeof value.sidebarWidth === "number"
         ? Math.min(380, Math.max(220, value.sidebarWidth))
         : DEFAULT_SIDEBAR_WIDTH,
+    windowSize: windowSizeValue(value.windowSize),
     sidebarCollapsed: value.sidebarCollapsed === true,
     sidebarSections: {
       pinnedExpanded:
@@ -157,6 +162,16 @@ function sanitizeState(value: unknown): AppState {
     activeRepositoryPath:
       typeof value.activeRepositoryPath === "string" ? value.activeRepositoryPath : undefined,
     workspaces,
+  };
+}
+
+function windowSizeValue(value: unknown): AppState["windowSize"] {
+  if (!isObject(value)) return DEFAULT_WINDOW_SIZE;
+  const width = typeof value.width === "number" ? value.width : DEFAULT_WINDOW_SIZE.width;
+  const height = typeof value.height === "number" ? value.height : DEFAULT_WINDOW_SIZE.height;
+  return {
+    width: Math.min(3840, Math.max(800, Math.round(width))),
+    height: Math.min(2400, Math.max(600, Math.round(height))),
   };
 }
 

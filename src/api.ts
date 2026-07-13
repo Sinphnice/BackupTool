@@ -30,6 +30,7 @@ function optionalText(value: string): string | undefined {
 function filterPayload(filter: BackupFilterDraft): Record<string, unknown> {
   return {
     pathRegex: optionalText(filter.pathRegex),
+    owner: optionalText(filter.owner),
     minSize: optionalNumber(filter.minSize),
     maxSize: optionalNumber(filter.maxSize),
     modifiedAfter: optionalUnixSeconds(filter.modifiedAfter),

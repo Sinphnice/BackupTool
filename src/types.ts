@@ -29,6 +29,7 @@ export type SnapshotInfo = {
 
 export type BackupFilterDraft = {
   pathRegex: string;
+  owner: string;
   minSize: string;
   maxSize: string;
   modifiedAfter: string;
@@ -58,6 +59,7 @@ export type RepositoryWorkspace = {
 export type AppState = {
   version: 1;
   sidebarWidth: number;
+  windowSize: { width: number; height: number };
   sidebarCollapsed: boolean;
   sidebarSections: SidebarSectionState;
   repositories: RepositoryRecord[];

@@ -181,6 +181,7 @@ fn backup_applies_path_regex_filter() {
         repository_dir.to_string_lossy().into_owned(),
         Some(BackupFilterDto {
             path_regex: Some(r"\.txt$".to_string()),
+            owner: None,
             min_size: None,
             max_size: None,
             modified_after: None,

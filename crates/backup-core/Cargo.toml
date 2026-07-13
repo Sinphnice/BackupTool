@@ -16,3 +16,10 @@ regex = "1"
 sha2 = "0.10"
 tar = "0.4"
 zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }

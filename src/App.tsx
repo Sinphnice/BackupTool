@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
+import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Archive,
@@ -76,6 +77,7 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 380;
 const MIN_REFRESH_ANIMATION_MS = 450;
 const REFRESH_FEEDBACK_DELAY_MS = 120;
+const WINDOW_SIZE_SAVE_DELAY_MS = 160;
 
 function hasTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -1026,7 +1028,7 @@ function AddSnapshotPage({
   onRemoveSource: (index: number) => void;
   onSubmit: () => Promise<boolean>;
 }): ReactElement {
-  type AddField = "sources" | "pathRegex" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
+  type AddField = "sources" | "pathRegex" | "owner" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
   const [invalidFields, setInvalidFields] = useState<Set<AddField>>(() => new Set());
 
   function validate(): FormValidation<AddField> | undefined {
@@ -1144,6 +1146,10 @@ function AddSnapshotPage({
             onChangeFilter("pathRegex", event.target.value);
             clearInvalid("pathRegex");
           }} autoComplete="off" placeholder=".*\\.txt$" /></label>
+          <label className="full-row">Owner<input className={inputStateClass(invalidFields.has("owner"))} value={draft.filter.owner} disabled={busy} onChange={(event) => {
+            onChangeFilter("owner", event.target.value);
+            clearInvalid("owner");
+          }} autoComplete="off" placeholder="DOMAIN\\user or user" /></label>
           <label>Minimum size<input className={inputStateClass(invalidFields.has("minSize"))} value={draft.filter.minSize} disabled={busy} onChange={(event) => {
             onChangeFilter("minSize", event.target.value);
             clearInvalidFields(["minSize", "maxSize"]);
@@ -1761,6 +1767,44 @@ export function App(): ReactElement {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!state || !hasTauriRuntime()) return undefined;
+    const appWindow = getCurrentWindow();
+    let cancelled = false;
+    let saveTimer: number | undefined;
+
+    void appWindow.setSize(new PhysicalSize(state.windowSize.width, state.windowSize.height));
+
+    const rememberSize = (width: number, height: number): void => {
+      if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => {
+        saveTimer = undefined;
+        void Promise.all([appWindow.isMaximized(), appWindow.isFullscreen()]).then(
+          ([isMaximized, isFullscreen]) => {
+            if (cancelled || isMaximized || isFullscreen) return;
+            updateState((draft) => {
+              draft.windowSize = { width, height };
+            });
+          },
+        );
+      }, WINDOW_SIZE_SAVE_DELAY_MS);
+    };
+
+    let unlisten: (() => void) | undefined;
+    void appWindow.onResized(({ payload }) => {
+      rememberSize(payload.width, payload.height);
+    }).then((handler) => {
+      if (cancelled) handler();
+      else unlisten = handler;
+    });
+
+    return () => {
+      cancelled = true;
+      if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+      unlisten?.();
+    };
+  }, [state !== null]);
 
   useEffect(() => {
     if (state) document.documentElement.style.setProperty("--sidebar-width", `${state.sidebarWidth}px`);
