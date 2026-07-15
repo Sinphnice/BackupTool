@@ -456,7 +456,35 @@ target/release/backup-tool.exe
 
 完整环境配置见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-## 17. 后续扩展方向
+## 17. WSL 与 POSIX 文件系统
+
+Windows 应用访问 WSL 文件时使用 UNC 路径，例如：
+
+```text
+\\wsl.localhost\Ubuntu-24.04\home\user\demo
+```
+
+`AutoFileSystemProvider` 会为这类路径选择 POSIX provider。扫描阶段通过 `wsl.exe stat` 获取真实 Linux 文件类型、大小、修改时间、模式、UID、GID 和设备主次编号；因此筛选条件不会混用 Windows UNC 元数据：
+
+- `path_regex` 匹配规范化后的相对路径。
+- `owner` 同时接受 Linux 用户名或 UID，例如 `root` / `0`、`sinphnice` / `1000`。
+- `min_size`、`max_size`、`modified_after`、`modified_before` 使用同一份 Linux `stat` 元数据。
+- 目录始终继续遍历；普通文件、符号链接、FIFO、设备节点和其他非目录节点会应用筛选条件。
+
+快照 entry 当前的文件类型包括：
+
+- `Directory`
+- `File`
+- `Symlink`
+- `Fifo`
+- `Device`
+- `Other`
+
+恢复到 WSL 时，符号链接、FIFO 和字符/块设备分别通过 Linux `ln -s`、`mkfifo`、`mknod` 创建；随后按恢复策略尽力回写 POSIX `mode`、`uid/gid` 和修改时间。目录元数据必须延后到子项写入后处理，避免先恢复 restrictive 权限导致子项无法创建。Unix socket 当前归为 `Other`，不支持恢复为可工作的 socket。
+
+密码属于前端会话敏感状态，不写入 Store。GUI 为所有密码输入框提供应用自绘的显示/隐藏控件，而不是依赖 WebView2 的原生密码揭示按钮。
+
+## 18. 后续扩展方向
 
 当前架构为后续能力预留了几个方向：
 
