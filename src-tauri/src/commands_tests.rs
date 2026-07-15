@@ -1,12 +1,16 @@
 use crate::commands::{
     backup, change_repository_password, create_repository, delete_repository, delete_snapshot,
-    export_repository, import_repository, list_snapshots, open_repository, rename_repository, restore,
-    unlock_repository,
+    export_repository, import_repository, list_snapshots, open_repository, rename_repository,
+    restore, unlock_repository,
 };
 use crate::dto::{BackupFilterDto, FlattenConflictStrategyDto, RestorePathStrategyDto};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// 这里直接调用 command 函数，重点覆盖 Tauri 边界层的 DTO 转换、路径校验和错误映射。
+// 具体备份算法的细节测试放在 backup-core，command 测试只验证 GUI 可调用的公开行为。
+
+// Repository 生命周期：创建、打开、改名、解锁和删除。
 #[test]
 fn create_and_open_repository_return_canonical_repository_info() {
     let root = TestDir::new("tauri_create_repository");
@@ -35,15 +39,13 @@ fn create_repository_rejects_invalid_names_and_existing_targets() {
     let root = TestDir::new("tauri_create_repository_invalid");
 
     for name in ["", "..", "bad/name", "CON", "trailing."] {
-        assert!(
-            create_repository(
-                root.path.to_string_lossy().into_owned(),
-                name.to_string(),
-                None,
-                None
-            )
-            .is_err()
-        );
+        assert!(create_repository(
+            root.path.to_string_lossy().into_owned(),
+            name.to_string(),
+            None,
+            None
+        )
+        .is_err());
     }
 
     create_repository(
@@ -117,6 +119,7 @@ fn delete_repository_removes_valid_repository_and_rejects_non_repository() {
     assert!(!std::path::Path::new(&created.path).exists());
 }
 
+// 基础备份/恢复和过滤条件，验证 command 参数能正确落到 core 选项上。
 #[test]
 fn backup_and_restore_round_trip_regular_files() {
     let root = TestDir::new("tauri_round_trip");
@@ -208,6 +211,7 @@ fn backup_applies_path_regex_filter() {
     assert!(!restore_dir.join("skip.png").exists());
 }
 
+// Snapshot 列表和删除接口用于 GUI 工作区刷新、选择和清理。
 #[test]
 fn list_snapshots_returns_repository_snapshot_summaries() {
     let root = TestDir::new("tauri_list_snapshots");
@@ -287,6 +291,7 @@ fn delete_snapshot_command_returns_cleanup_summary() {
     );
 }
 
+// 输入校验与 core 错误映射，保证前端能得到可展示的错误字符串。
 #[test]
 fn backup_returns_core_error_as_string() {
     let error = backup(
@@ -361,6 +366,7 @@ fn backup_requires_at_least_one_source() {
     assert!(error.contains("at least one source path is required"));
 }
 
+// 多源备份和恢复路径策略属于 command 层需要传递的组合参数。
 #[test]
 fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
     let root = TestDir::new("tauri_multi_source");
@@ -402,6 +408,7 @@ fn backup_accepts_multiple_sources_and_restore_uses_path_options() {
     assert!(restore_dir.join("same (1).txt").exists());
 }
 
+// 压缩和加密测试只检查命令参数、object header 与恢复闭环，不重复 core 细节。
 #[test]
 fn backup_command_accepts_zstd_compression_and_restore_decompresses() {
     let root = TestDir::new("tauri_zstd_backup");
@@ -801,6 +808,7 @@ fn encrypted_repository_stays_encrypted_after_plain_snapshot_restore_and_delete(
     );
 }
 
+// 归档命令覆盖 tar 导出/导入，以及未知算法和非空目标目录的错误路径。
 #[test]
 fn export_and_import_repository_commands_round_trip_tar() {
     let root = TestDir::new("tauri_archive_round_trip");
@@ -905,6 +913,7 @@ fn import_repository_command_rejects_non_empty_destination() {
     assert!(error.contains("import destination exists and is not empty"));
 }
 
+// 每个测试使用独立临时目录，Drop 只做尽力清理，避免清理失败掩盖真实断言。
 struct TestDir {
     path: std::path::PathBuf,
 }

@@ -10,6 +10,8 @@ use backup_core::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Tauri command 层保持“薄适配”：校验 GUI 输入、转换 DTO，并把 core 错误映射成字符串。
+/// 新建 repository，并把目录名作为第一版显示名写入仓库元数据。
 #[tauri::command]
 pub(crate) fn create_repository(
     parent_path: String,
@@ -44,6 +46,7 @@ pub(crate) fn create_repository(
     repository_info(&repository)
 }
 
+/// 打开已有 repository，返回前端侧栏需要的规范化路径和显示信息。
 #[tauri::command]
 pub(crate) fn open_repository(repository_path: String) -> Result<RepositoryInfoDto, String> {
     let repository = Repository::open(path_from_input(repository_path, "repository")?)
@@ -51,6 +54,7 @@ pub(crate) fn open_repository(repository_path: String) -> Result<RepositoryInfoD
     repository_info(&repository)
 }
 
+/// 修改 repository 显示名；这里只改元数据，不重命名磁盘目录。
 #[tauri::command]
 pub(crate) fn rename_repository(
     repository_path: String,
@@ -64,6 +68,7 @@ pub(crate) fn rename_repository(
     repository_info(&repository)
 }
 
+/// 校验本次会话输入的仓库密码，密码本身只留在前端会话状态中。
 #[tauri::command]
 pub(crate) fn unlock_repository(
     repository_path: String,
@@ -77,6 +82,7 @@ pub(crate) fn unlock_repository(
     repository_info(&repository)
 }
 
+/// 使用旧密码解封主密钥后，再用新密码重新封装仓库主密钥。
 #[tauri::command]
 pub(crate) fn change_repository_password(
     repository_path: String,
@@ -91,6 +97,7 @@ pub(crate) fn change_repository_password(
     repository_info(&repository)
 }
 
+/// 删除整个 repository。命令层额外做根目录和仓库结构检查，避免误删普通目录。
 #[tauri::command]
 pub(crate) fn delete_repository(
     repository_path: String,
@@ -222,13 +229,7 @@ pub(crate) fn restore(
         warnings: report
             .warnings
             .into_iter()
-            .map(|warning| {
-                format!(
-                    "{}: {}",
-                    warning.relative_path.display(),
-                    warning.message
-                )
-            })
+            .map(|warning| format!("{}: {}", warning.relative_path.display(), warning.message))
             .collect(),
     })
 }
@@ -245,6 +246,7 @@ pub(crate) fn list_snapshots(repository_path: String) -> Result<Vec<SnapshotInfo
         .map_err(|error| error.to_string())
 }
 
+/// 删除指定 snapshot，并由 core 扫描剩余引用后清理不再使用的 object。
 #[tauri::command]
 pub(crate) fn delete_snapshot(
     repository_path: String,
@@ -263,6 +265,7 @@ pub(crate) fn delete_snapshot(
         .map_err(|error| error.to_string())
 }
 
+/// 将完整 repository 导出为归档文件；当前算法只开放 tar。
 #[tauri::command]
 pub(crate) fn export_repository(
     repository_path: String,
@@ -278,6 +281,7 @@ pub(crate) fn export_repository(
         .map_err(|error| error.to_string())
 }
 
+/// 从归档文件导入 repository，导入后返回可直接加入侧栏的仓库路径。
 #[tauri::command]
 pub(crate) fn import_repository(
     archive_path: String,
@@ -300,6 +304,7 @@ pub(crate) fn import_repository(
     })
 }
 
+// 备份命令兼容“目标目录不存在则初始化仓库”的工作流，但拒绝混入普通非空目录。
 fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
     if path.join("repo.meta").is_file() {
         return Repository::open(path).map_err(|error| error.to_string());
@@ -320,6 +325,7 @@ fn open_or_init_repository(path: PathBuf) -> Result<Repository, String> {
     Repository::init(path).map_err(|error| error.to_string())
 }
 
+// 前端以路径作为仓库唯一标识，因此这里统一返回规范化且适合展示的路径。
 fn repository_info(repository: &Repository) -> Result<RepositoryInfoDto, String> {
     let path = clean_canonical_path(
         fs::canonicalize(repository.root()).map_err(|error| error.to_string())?,
@@ -340,6 +346,7 @@ fn encryption_algorithm_to_string(value: EncryptionAlgorithm) -> String {
     .to_string()
 }
 
+// Windows canonicalize 会产生 \\?\ 前缀；GUI 展示和状态去重使用普通路径更直观。
 fn clean_canonical_path(path: PathBuf) -> PathBuf {
     if !cfg!(windows) {
         return path;
@@ -354,6 +361,7 @@ fn clean_canonical_path(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
+// 仓库名同时作为目录名使用，因此按 Windows 目录名限制做前置校验。
 fn validate_repository_name(value: &str) -> Result<&str, String> {
     let name = value.trim();
     if name.is_empty() {
@@ -406,6 +414,7 @@ fn validate_repository_name(value: &str) -> Result<&str, String> {
     Ok(name)
 }
 
+// command 层先保证源路径是目录，避免把 core 的扫描错误暴露成不明确的 GUI 反馈。
 fn ensure_source_directory(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(BackupError::SourceDoesNotExist(path.to_path_buf()).to_string());
@@ -426,6 +435,7 @@ fn path_from_input(value: String, name: &'static str) -> Result<PathBuf, String>
     Ok(PathBuf::from(trimmed))
 }
 
+// 多源备份必须至少有一个源；每个源仍复用单路径校验逻辑。
 fn paths_from_input(values: Vec<String>, name: &'static str) -> Result<Vec<PathBuf>, String> {
     if values.is_empty() {
         return Err(format!("at least one {name} path is required"));
@@ -436,6 +446,7 @@ fn paths_from_input(values: Vec<String>, name: &'static str) -> Result<Vec<PathB
         .collect()
 }
 
+// snapshot id 来自前端选择项，不允许空白字符串继续进入 core。
 fn snapshot_id_from_input(value: String) -> Result<SnapshotId, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -444,6 +455,7 @@ fn snapshot_id_from_input(value: String) -> Result<SnapshotId, String> {
     Ok(SnapshotId::from(trimmed.to_string()))
 }
 
+// 归档算法参数保留扩展点，当前只把空值和 tar 映射到 tar。
 fn archive_algorithm_from_input(value: Option<String>) -> Result<ArchiveAlgorithm, String> {
     let value = value.unwrap_or_else(|| "tar".to_string());
     match value.trim().to_ascii_lowercase().as_str() {
@@ -458,6 +470,7 @@ fn archive_algorithm_name(value: ArchiveAlgorithm) -> &'static str {
     }
 }
 
+// 压缩算法属于写入 object 时的选项；恢复时由 object header 自描述。
 fn compression_algorithm_from_input(value: Option<String>) -> Result<CompressionAlgorithm, String> {
     let value = value.unwrap_or_else(|| "none".to_string());
     match value.trim().to_ascii_lowercase().as_str() {
@@ -467,6 +480,7 @@ fn compression_algorithm_from_input(value: Option<String>) -> Result<Compression
     }
 }
 
+// 加密算法由仓库和本次 snapshot 共同约束，命令层先处理字符串枚举。
 fn encryption_algorithm_from_input(value: Option<String>) -> Result<EncryptionAlgorithm, String> {
     let value = value.unwrap_or_else(|| "none".to_string());
     match value.trim().to_ascii_lowercase().as_str() {
@@ -476,6 +490,7 @@ fn encryption_algorithm_from_input(value: Option<String>) -> Result<EncryptionAl
     }
 }
 
+// 只有真正启用 AES 时才要求密码；未加密 snapshot 不应被空密码阻断。
 fn validate_encryption_password(
     algorithm: EncryptionAlgorithm,
     password: Option<&str>,
@@ -486,6 +501,7 @@ fn validate_encryption_password(
     Ok(())
 }
 
+// 空字符串等价于未提供密码，避免前端表单把空输入误传成有效 secret。
 fn normalize_optional_secret(value: Option<String>) -> Option<String> {
     value.and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
@@ -496,6 +512,7 @@ struct OperationSummary {
     byte_count: u64,
 }
 
+// command 返回的文件数和字节数按 snapshot 中的普通文件 entry 汇总。
 fn summarize_snapshot_file(snapshot_file: &SnapshotFile) -> OperationSummary {
     let mut summary = OperationSummary::default();
     for entry in &snapshot_file.entries {

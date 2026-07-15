@@ -90,6 +90,7 @@ pub struct FileEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HardLinkIdentity {
+    // POSIX/WSL 下同一 device + inode 表示同一个文件实体，用于恢复硬链接关系。
     pub filesystem_device: u64,
     pub inode: u64,
 }
@@ -511,6 +512,7 @@ impl FileSystemWriter for PosixFileSystemProvider {
         if let (Some((distribution, linux_path)), Some((target_distribution, target_linux_path))) =
             (wsl_unc_path(path), wsl_unc_path(target))
         {
+            // Windows 无法直接用普通 Win32 文件 API 重建 WSL 内的 Linux 硬链接。
             if distribution != target_distribution {
                 return Err(BackupError::InvalidRepository(
                     "cannot create a hard link across WSL distributions".into(),
