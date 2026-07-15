@@ -1,6 +1,6 @@
 [package]
 name = "backup-tool"
-version = "0.2.0"
+version = "0.2.1"
 description = "BackupTool desktop application"
 authors = ["BackupTool contributors"]
 edition = "2021"

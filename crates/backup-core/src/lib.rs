@@ -114,6 +114,17 @@ impl BackupFilter {
         self.compiled_path_regex().map(|_| ())
     }
 
+    /// 判断路径是否通过路径正则筛选。
+    ///
+    /// 目录需要始终继续遍历，因此调用方只应将此规则用于需要写入快照的非目录节点。
+    pub(crate) fn allows_path(&self, relative_path: &Path) -> BackupCoreResult<bool> {
+        let path_text = normalize_path_text(relative_path);
+        if let Some(regex) = self.compiled_path_regex()? {
+            return Ok(regex.is_match(&path_text));
+        }
+        Ok(true)
+    }
+
     /// 判断一个普通文件是否应该被复制到备份输出目录。
     pub fn allows(
         &self,
@@ -121,11 +132,8 @@ impl BackupFilter {
         path: &Path,
         metadata: &fs::Metadata,
     ) -> BackupCoreResult<bool> {
-        let path_text = normalize_path_text(relative_path);
-        if let Some(regex) = self.compiled_path_regex()? {
-            if !regex.is_match(&path_text) {
-                return Ok(false);
-            }
+        if !self.allows_path(relative_path)? {
+            return Ok(false);
         }
 
         if let Some(owner_filter) = normalized_filter_text(self.owner.as_deref()) {
@@ -146,6 +154,60 @@ impl BackupFilter {
         }
 
         let modified = modified_unix_seconds(relative_path, metadata)?;
+        if self
+            .modified_after
+            .is_some_and(|minimum| modified < minimum)
+        {
+            return Ok(false);
+        }
+        if self
+            .modified_before
+            .is_some_and(|maximum| modified > maximum)
+        {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    /// 判断扫描阶段已经读取到元数据的文件节点是否符合筛选条件。
+    ///
+    /// WSL 路径的 `FileEntry` 元数据来自 Linux `stat`，避免筛选阶段重新通过
+    /// Windows UNC 元数据接口读取大小或时间。
+    pub(crate) fn allows_file_entry(
+        &self,
+        path: &Path,
+        entry: &crate::filesystem::FileEntry,
+    ) -> BackupCoreResult<bool> {
+        if !self.allows_path(&entry.relative_path)? {
+            return Ok(false);
+        }
+
+        if let Some(owner_filter) = normalized_filter_text(self.owner.as_deref()) {
+            let owners = file_entry_owner_values(path, entry)?;
+            if owners.is_empty() {
+                return Ok(false);
+            }
+            if !owners
+                .iter()
+                .any(|owner| owner_matches(owner, owner_filter))
+            {
+                return Ok(false);
+            }
+        }
+
+        let size = entry.metadata.size;
+        if self.min_size.is_some_and(|minimum| size < minimum) {
+            return Ok(false);
+        }
+        if self.max_size.is_some_and(|maximum| size > maximum) {
+            return Ok(false);
+        }
+
+        let modified = entry
+            .metadata
+            .modified_unix_seconds
+            .ok_or_else(|| BackupError::InvalidModifiedTime(entry.relative_path.clone()))?;
         if self
             .modified_after
             .is_some_and(|minimum| modified < minimum)
@@ -203,7 +265,21 @@ fn owner_matches(owner: &str, filter: &str) -> bool {
 
 #[cfg(windows)]
 fn file_owner_text(path: &Path, _metadata: &fs::Metadata) -> BackupCoreResult<Option<String>> {
+    if let Some(owners) = crate::filesystem::wsl_file_owner_values(path)? {
+        return Ok(owners.into_iter().next());
+    }
     windows_file_owner_text(path)
+}
+
+#[cfg(windows)]
+fn file_entry_owner_values(
+    path: &Path,
+    _entry: &crate::filesystem::FileEntry,
+) -> BackupCoreResult<Vec<String>> {
+    if let Some(owners) = crate::filesystem::wsl_file_owner_values(path)? {
+        return Ok(owners);
+    }
+    Ok(windows_file_owner_text(path)?.into_iter().collect())
 }
 
 #[cfg(unix)]
@@ -212,9 +288,30 @@ fn file_owner_text(_path: &Path, metadata: &fs::Metadata) -> BackupCoreResult<Op
     Ok(Some(metadata.uid().to_string()))
 }
 
+#[cfg(unix)]
+fn file_entry_owner_values(
+    _path: &Path,
+    entry: &crate::filesystem::FileEntry,
+) -> BackupCoreResult<Vec<String>> {
+    match &entry.metadata.platform {
+        crate::filesystem::PlatformMetadata::Posix(metadata) => {
+            Ok(metadata.uid.map(|uid| vec![uid.to_string()]).unwrap_or_default())
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 #[cfg(not(any(windows, unix)))]
 fn file_owner_text(_path: &Path, _metadata: &fs::Metadata) -> BackupCoreResult<Option<String>> {
     Ok(None)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_entry_owner_values(
+    _path: &Path,
+    _entry: &crate::filesystem::FileEntry,
+) -> BackupCoreResult<Vec<String>> {
+    Ok(Vec::new())
 }
 
 #[cfg(windows)]

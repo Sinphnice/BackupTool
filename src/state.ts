@@ -11,6 +11,7 @@ const STORE_PATH = "backup-tool-ui.json";
 const STORE_KEY = "appState";
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const DEFAULT_WINDOW_SIZE = { width: 1600, height: 1200 };
+const MIN_WINDOW_SIZE = { width: 1200, height: 800 };
 let storePromise: Promise<Store> | undefined;
 let saveTimer: number | undefined;
 
@@ -170,8 +171,8 @@ function windowSizeValue(value: unknown): AppState["windowSize"] {
   const width = typeof value.width === "number" ? value.width : DEFAULT_WINDOW_SIZE.width;
   const height = typeof value.height === "number" ? value.height : DEFAULT_WINDOW_SIZE.height;
   return {
-    width: Math.min(3840, Math.max(800, Math.round(width))),
-    height: Math.min(2400, Math.max(600, Math.round(height))),
+    width: Math.min(3840, Math.max(MIN_WINDOW_SIZE.width, Math.round(width))),
+    height: Math.min(2400, Math.max(MIN_WINDOW_SIZE.height, Math.round(height))),
   };
 }
 

@@ -148,6 +148,7 @@ pub struct SnapshotEntry {
     pub size: u64,
     pub modified_unix_seconds: Option<i64>,
     pub object_id: Option<ObjectId>,
+    pub link_target: Option<PathBuf>,
     pub metadata: Metadata,
 }
 
@@ -1722,6 +1723,9 @@ impl RepositoryReader {
         let is_multi_source = snapshot_file.sources.len() > 1;
         let source_roots = resolve_source_roots(&snapshot_file, &options)?;
         fs::create_dir_all(destination)?;
+        // Directory metadata is restored after children so restrictive source permissions
+        // cannot prevent files below the directory from being created.
+        let mut deferred_directory_metadata = Vec::new();
 
         for entry in &snapshot_file.entries {
             let Some(target) =
@@ -1733,11 +1737,8 @@ impl RepositoryReader {
                 FileKind::Directory => {
                     if options.path_strategy != RestorePathStrategy::Flatten {
                         writer.create_directory(&target)?;
-                        report.warnings.extend(writer.restore_metadata(
-                            &target,
-                            &entry.to_file_entry_at(&target),
-                            options.strategy,
-                        )?);
+                        let file_entry = entry.to_file_entry_at(&target);
+                        deferred_directory_metadata.push((target, file_entry));
                     }
                 }
                 FileKind::File => {
@@ -1762,7 +1763,94 @@ impl RepositoryReader {
                         options.strategy,
                     )?);
                 }
-                FileKind::Symlink | FileKind::Other => {
+                FileKind::Symlink => {
+                    if options.path_strategy == RestorePathStrategy::Flatten && is_multi_source {
+                        continue;
+                    }
+                    let link_target = entry.link_target.as_ref().ok_or_else(|| {
+                        BackupError::InvalidSnapshot(format!(
+                            "symlink entry missing target: {}",
+                            entry.relative_path.display()
+                        ))
+                    })?;
+                    let target = match resolve_file_conflict(target, &options) {
+                        Ok(target) => target,
+                        Err(BackupError::SkipFile(_)) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let file_entry = entry.to_file_entry_at(&target);
+                    match writer.create_symlink(&target, link_target) {
+                        Ok(warnings) => {
+                            report.warnings.extend(warnings);
+                            report.warnings.extend(writer.restore_metadata(
+                                &target,
+                                &file_entry,
+                                options.strategy,
+                            )?);
+                        }
+                        Err(error) => handle_node_restore_error(
+                            &mut report,
+                            &file_entry,
+                            options.strategy,
+                            format!("failed to restore symlink: {error}"),
+                        )?,
+                    }
+                }
+                FileKind::Fifo => {
+                    if options.path_strategy == RestorePathStrategy::Flatten && is_multi_source {
+                        continue;
+                    }
+                    let target = match resolve_file_conflict(target, &options) {
+                        Ok(target) => target,
+                        Err(BackupError::SkipFile(_)) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let file_entry = entry.to_file_entry_at(&target);
+                    match writer.create_fifo(&target, &file_entry) {
+                        Ok(warnings) => {
+                            report.warnings.extend(warnings);
+                            report.warnings.extend(writer.restore_metadata(
+                                &target,
+                                &file_entry,
+                                options.strategy,
+                            )?);
+                        }
+                        Err(error) => handle_node_restore_error(
+                            &mut report,
+                            &file_entry,
+                            options.strategy,
+                            format!("failed to restore fifo: {error}"),
+                        )?,
+                    }
+                }
+                FileKind::Device => {
+                    if options.path_strategy == RestorePathStrategy::Flatten && is_multi_source {
+                        continue;
+                    }
+                    let target = match resolve_file_conflict(target, &options) {
+                        Ok(target) => target,
+                        Err(BackupError::SkipFile(_)) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let file_entry = entry.to_file_entry_at(&target);
+                    match writer.create_device(&target, &file_entry) {
+                        Ok(warnings) => {
+                            report.warnings.extend(warnings);
+                            report.warnings.extend(writer.restore_metadata(
+                                &target,
+                                &file_entry,
+                                options.strategy,
+                            )?);
+                        }
+                        Err(error) => handle_node_restore_error(
+                            &mut report,
+                            &file_entry,
+                            options.strategy,
+                            format!("failed to restore device node: {error}"),
+                        )?,
+                    }
+                }
+                FileKind::Other => {
                     if options.path_strategy != RestorePathStrategy::Flatten || !is_multi_source {
                         report.warnings.extend(writer.handle_unsupported_entry(
                             &target,
@@ -1772,6 +1860,12 @@ impl RepositoryReader {
                     }
                 }
             }
+        }
+
+        for (target, entry) in deferred_directory_metadata.into_iter().rev() {
+            report
+                .warnings
+                .extend(writer.restore_metadata(&target, &entry, options.strategy)?);
         }
 
         Ok(report)
@@ -1812,6 +1906,28 @@ impl SnapshotEntry {
     }
 }
 
+fn handle_node_restore_error(
+    report: &mut RestoreReport,
+    entry: &FileEntry,
+    strategy: crate::filesystem::RestoreStrategy,
+    message: String,
+) -> BackupCoreResult<()> {
+    match strategy {
+        crate::filesystem::RestoreStrategy::DataOnly => Ok(()),
+        crate::filesystem::RestoreStrategy::BestEffort => {
+            report.warnings.push(crate::filesystem::RestoreWarning {
+                relative_path: entry.relative_path.clone(),
+                message,
+            });
+            Ok(())
+        }
+        crate::filesystem::RestoreStrategy::Strict => Err(BackupError::MetadataRestore {
+            path: entry.relative_path.clone(),
+            message,
+        }),
+    }
+}
+
 fn scan_into_snapshot_file(
     root: &Path,
     current: &Path,
@@ -1824,10 +1940,23 @@ fn scan_into_snapshot_file(
     master_key: Option<&RepositoryMasterKey>,
     snapshot_file: &mut SnapshotFile,
 ) -> BackupCoreResult<()> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(error) if is_skippable_scan_io_error(&error) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if is_skippable_scan_io_error(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
         let path = entry.path();
-        let file_entry = provider.read_entry(root, &path)?;
+        let file_entry = match provider.read_entry(root, &path) {
+            Ok(file_entry) => file_entry,
+            Err(error) if is_skippable_scan_error(&error) => continue,
+            Err(error) => return Err(error),
+        };
 
         if file_entry.file_type == FileKind::Directory {
             snapshot_file.entries.push(SnapshotEntry::from_file_entry(
@@ -1850,7 +1979,36 @@ fn scan_into_snapshot_file(
             continue;
         }
 
-        if file_entry.file_type == FileKind::Symlink || file_entry.file_type == FileKind::Other {
+        if !filter.allows_file_entry(&path, &file_entry)? {
+            continue;
+        }
+
+        if file_entry.file_type == FileKind::Symlink {
+            let link_target = match provider.read_link(&path) {
+                Ok(link_target) => link_target,
+                Err(error) if is_skippable_scan_error(&error) => {
+                    snapshot_file.entries.push(SnapshotEntry::unsupported_from_file_entry(
+                        source_index,
+                        file_entry,
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            snapshot_file
+                .entries
+                .push(SnapshotEntry::symlink_from_file_entry(
+                    source_index,
+                    file_entry,
+                    link_target,
+                ));
+            continue;
+        }
+
+        if matches!(
+            file_entry.file_type,
+            FileKind::Fifo | FileKind::Device | FileKind::Other
+        ) {
             snapshot_file.entries.push(SnapshotEntry::from_file_entry(
                 source_index,
                 file_entry,
@@ -1859,14 +2017,17 @@ fn scan_into_snapshot_file(
             continue;
         }
 
-        let metadata = fs::metadata(&path)?;
-        if file_entry.file_type != FileKind::File
-            || !filter.allows(&file_entry.relative_path, &path, &metadata)?
-        {
-            continue;
-        }
-
-        let bytes = provider.read_file(&path)?;
+        let bytes = match provider.read_file(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if is_skippable_scan_error(&error) => {
+                snapshot_file.entries.push(SnapshotEntry::unsupported_from_file_entry(
+                    source_index,
+                    file_entry,
+                ));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let stored_object = object_store.write_object_with_options(
             &bytes,
             compression_algorithm,
@@ -1878,6 +2039,15 @@ fn scan_into_snapshot_file(
     }
 
     Ok(())
+}
+
+fn is_skippable_scan_io_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(1 | 433 | 995))
+}
+
+fn is_skippable_scan_error(error: &BackupError) -> bool {
+    matches!(error, BackupError::Io(io_error) if is_skippable_scan_io_error(io_error))
 }
 
 impl SnapshotFile {
@@ -1907,6 +2077,11 @@ impl SnapshotFile {
 }
 
 impl SnapshotEntry {
+    fn unsupported_from_file_entry(source_index: usize, mut file_entry: FileEntry) -> Self {
+        file_entry.file_type = FileKind::Other;
+        Self::from_file_entry(source_index, file_entry, None)
+    }
+
     fn from_file_entry(
         source_index: usize,
         file_entry: FileEntry,
@@ -1919,6 +2094,24 @@ impl SnapshotEntry {
             size: file_entry.metadata.size,
             modified_unix_seconds: file_entry.metadata.modified_unix_seconds,
             object_id,
+            link_target: None,
+            metadata: file_entry.metadata,
+        }
+    }
+
+    fn symlink_from_file_entry(
+        source_index: usize,
+        file_entry: FileEntry,
+        link_target: PathBuf,
+    ) -> Self {
+        Self {
+            source_index,
+            relative_path: file_entry.relative_path,
+            kind: file_entry.file_type,
+            size: file_entry.metadata.size,
+            modified_unix_seconds: file_entry.metadata.modified_unix_seconds,
+            object_id: None,
+            link_target: Some(link_target),
             metadata: file_entry.metadata,
         }
     }
@@ -2219,7 +2412,11 @@ fn write_snapshot_file(path: &Path, snapshot_file: &SnapshotFile) -> BackupCoreR
         output.push('\t');
         output.push_str(if entry.metadata.readonly { "1" } else { "0" });
         output.push('\t');
-        output.push_str(platform_snapshot_value(&entry.metadata.platform));
+        output.push_str(&platform_snapshot_value(&entry.metadata.platform));
+        output.push('\t');
+        if let Some(link_target) = &entry.link_target {
+            output.push_str(&escape_field(&link_target.to_string_lossy()));
+        }
         output.push('\n');
     }
 
@@ -2322,7 +2519,7 @@ fn read_snapshot_file(path: &Path) -> BackupCoreResult<SnapshotFile> {
 
 fn parse_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<SnapshotEntry> {
     match parts.len() {
-        11 => parse_current_entry_line(parts, line),
+        11 | 12 => parse_current_entry_line(parts, line),
         _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid entry line: {line}"
         ))),
@@ -2373,6 +2570,13 @@ fn parse_entry_fields(
     let created_unix_seconds = parse_optional_i64(extra.get(1).copied().unwrap_or(""))?;
     let readonly = parse_readonly(extra.get(2).copied().unwrap_or(""))?;
     let platform = parse_platform_metadata(extra.get(3).copied().unwrap_or(""))?;
+    let link_target = extra
+        .get(4)
+        .copied()
+        .filter(|value| !value.is_empty())
+        .map(unescape_field)
+        .transpose()?
+        .map(PathBuf::from);
 
     Ok(SnapshotEntry {
         source_index,
@@ -2381,6 +2585,7 @@ fn parse_entry_fields(
         size,
         modified_unix_seconds,
         object_id,
+        link_target,
         metadata: Metadata {
             size,
             modified_unix_seconds,
@@ -2445,35 +2650,123 @@ fn parse_readonly(value: &str) -> BackupCoreResult<bool> {
     }
 }
 
-fn platform_snapshot_value(platform: &PlatformMetadata) -> &'static str {
+fn platform_snapshot_value(platform: &PlatformMetadata) -> String {
     match platform {
-        PlatformMetadata::Basic => "basic",
-        PlatformMetadata::Windows(_) => "windows",
-        PlatformMetadata::Posix(_) => "posix",
+        PlatformMetadata::Basic => "basic".to_string(),
+        PlatformMetadata::Windows(metadata) => format!(
+            "windows,{},{},{}",
+            metadata
+                .file_attributes
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            bool_snapshot_value(metadata.is_symlink),
+            bool_snapshot_value(metadata.is_reparse_point)
+        ),
+        PlatformMetadata::Posix(metadata) => format!(
+            "posix,{},{},{},{},{},{},{},{}",
+            metadata
+                .mode
+                .map(|value| format!("{value:x}"))
+                .unwrap_or_default(),
+            metadata
+                .uid
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            metadata
+                .gid
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            bool_snapshot_value(metadata.is_symlink),
+            bool_snapshot_value(metadata.is_fifo),
+            bool_snapshot_value(metadata.is_device),
+            metadata
+                .device_major
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            metadata
+                .device_minor
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
     }
 }
 
 fn parse_platform_metadata(value: &str) -> BackupCoreResult<PlatformMetadata> {
-    match value {
-        "" | "basic" => Ok(PlatformMetadata::Basic),
-        "windows" => Ok(PlatformMetadata::Windows(
+    if value.is_empty() || value == "basic" {
+        return Ok(PlatformMetadata::Basic);
+    }
+    let parts = value.split(',').collect::<Vec<_>>();
+    match parts.first().copied() {
+        Some("windows") => Ok(PlatformMetadata::Windows(
             crate::filesystem::WindowsMetadata {
-                file_attributes: None,
-                is_symlink: false,
-                is_reparse_point: false,
+                file_attributes: parse_optional_u32(parts.get(1).copied().unwrap_or(""))?,
+                is_symlink: parse_optional_bool(parts.get(2).copied().unwrap_or(""))?,
+                is_reparse_point: parse_optional_bool(parts.get(3).copied().unwrap_or(""))?,
             },
         )),
-        "posix" => Ok(PlatformMetadata::Posix(crate::filesystem::PosixMetadata {
-            mode: None,
-            uid: None,
-            gid: None,
-            is_symlink: false,
-            is_fifo: false,
-            is_device: false,
+        Some("posix") => Ok(PlatformMetadata::Posix(crate::filesystem::PosixMetadata {
+            mode: parse_optional_hex_u32(parts.get(1).copied().unwrap_or(""))?,
+            uid: parse_optional_u32(parts.get(2).copied().unwrap_or(""))?,
+            gid: parse_optional_u32(parts.get(3).copied().unwrap_or(""))?,
+            is_symlink: parse_optional_bool(parts.get(4).copied().unwrap_or(""))?,
+            is_fifo: parse_optional_bool(parts.get(5).copied().unwrap_or(""))?,
+            is_device: parse_optional_bool(parts.get(6).copied().unwrap_or(""))?,
+            device_major: parse_optional_u64(parts.get(7).copied().unwrap_or(""))?,
+            device_minor: parse_optional_u64(parts.get(8).copied().unwrap_or(""))?,
         })),
         _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid platform metadata: {value}"
         ))),
+    }
+}
+
+fn bool_snapshot_value(value: bool) -> &'static str {
+    if value {
+        "1"
+    } else {
+        "0"
+    }
+}
+
+fn parse_optional_bool(value: &str) -> BackupCoreResult<bool> {
+    match value {
+        "" | "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(BackupError::InvalidSnapshot(format!(
+            "invalid boolean value: {value}"
+        ))),
+    }
+}
+
+fn parse_optional_u32(value: &str) -> BackupCoreResult<Option<u32>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
+    }
+}
+
+fn parse_optional_u64(value: &str) -> BackupCoreResult<Option<u64>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| BackupError::InvalidSnapshot(format!("invalid integer: {value}")))
+    }
+}
+
+fn parse_optional_hex_u32(value: &str) -> BackupCoreResult<Option<u32>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        u32::from_str_radix(value, 16)
+            .map(Some)
+            .map_err(|_| BackupError::InvalidSnapshot(format!("invalid hex integer: {value}")))
     }
 }
 

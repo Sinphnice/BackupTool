@@ -1,6 +1,6 @@
 [package]
 name = "backup-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 [lib]
@@ -23,3 +23,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

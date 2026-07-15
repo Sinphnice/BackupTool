@@ -84,6 +84,7 @@ export type ArchiveResult = {
 export type RestoreResult = {
   fileCount: number;
   byteCount: number;
+  warnings: string[];
 };
 
 export type SnapshotDeleteResult = {

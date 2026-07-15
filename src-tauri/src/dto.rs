@@ -32,6 +32,7 @@ pub(crate) struct BackupResultDto {
 pub(crate) struct RestoreResultDto {
     pub(crate) file_count: u64,
     pub(crate) byte_count: u64,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

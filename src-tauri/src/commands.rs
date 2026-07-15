@@ -207,7 +207,7 @@ pub(crate) fn restore(
         options.flatten_conflict_strategy = flatten_conflict_strategy.into();
     }
     options.decryption_password = normalize_optional_secret(decryption_password);
-    repository
+    let report = repository
         .reader()
         .restore_with_options(
             &snapshot_id,
@@ -219,6 +219,17 @@ pub(crate) fn restore(
     Ok(RestoreResultDto {
         file_count: summary.file_count,
         byte_count: summary.byte_count,
+        warnings: report
+            .warnings
+            .into_iter()
+            .map(|warning| {
+                format!(
+                    "{}: {}",
+                    warning.relative_path.display(),
+                    warning.message
+                )
+            })
+            .collect(),
     })
 }
 

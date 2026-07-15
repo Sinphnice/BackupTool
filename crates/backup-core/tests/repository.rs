@@ -1607,7 +1607,7 @@ fn snapshot_entry_does_not_store_compression_algorithm() {
     let text = fs::read_to_string(&snapshot_path).unwrap();
 
     for line in text.lines().filter(|line| line.starts_with("entry\t")) {
-        assert_eq!(line.split('\t').count(), 11);
+        assert_eq!(line.split('\t').count(), 12);
         assert!(!line.contains("\tzstd"));
         assert!(!line.contains("\tnone"));
     }
@@ -1949,4 +1949,105 @@ fn collect_file_names_into(
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn backs_up_and_restores_symlink_and_fifo_nodes() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+
+    let root = TestDir::new("repo_special_nodes");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("target.txt"), "alpha").unwrap();
+
+    std::os::unix::fs::symlink("target.txt", source.join("link.txt")).unwrap();
+
+    let fifo_path = source.join("pipe");
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+    let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(result, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+
+    let symlink_entry = snapshot_file
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == PathBuf::from("link.txt"))
+        .unwrap();
+    assert_eq!(symlink_entry.kind, FileKind::Symlink);
+    assert_eq!(symlink_entry.link_target.as_deref(), Some(Path::new("target.txt")));
+    assert!(symlink_entry.object_id.is_none());
+
+    let fifo_entry = snapshot_file
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == PathBuf::from("pipe"))
+        .unwrap();
+    assert_eq!(fifo_entry.kind, FileKind::Fifo);
+    assert!(fifo_entry.object_id.is_none());
+
+    repository
+        .reader()
+        .restore(&snapshot.id, &restore, RestoreOptions::default())
+        .unwrap();
+
+    assert_eq!(fs::read_link(restore.join("link.txt")).unwrap(), PathBuf::from("target.txt"));
+    assert!(fs::symlink_metadata(restore.join("pipe"))
+        .unwrap()
+        .file_type()
+        .is_fifo());
+}
+
+#[cfg(unix)]
+#[test]
+fn path_regex_filters_symlink_and_fifo_nodes() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = TestDir::new("repo_special_node_filter");
+    let repository = Repository::init(root.path.join("repository")).unwrap();
+    let source = root.path.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("target.txt"), "alpha").unwrap();
+    std::os::unix::fs::symlink("target.txt", source.join("link.txt")).unwrap();
+
+    let fifo_path = source.join("pipe");
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+    let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(result, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    let snapshot = repository
+        .writer()
+        .backup(
+            &source,
+            &BackupFilter {
+                path_regex: Some(r"^(link\.txt|pipe)$".to_string()),
+                ..BackupFilter::default()
+            },
+        )
+        .unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+
+    assert!(snapshot_file
+        .entries
+        .iter()
+        .any(|entry| entry.relative_path == PathBuf::from("link.txt") && entry.kind == FileKind::Symlink));
+    assert!(snapshot_file
+        .entries
+        .iter()
+        .any(|entry| entry.relative_path == PathBuf::from("pipe") && entry.kind == FileKind::Fifo));
+    assert!(!snapshot_file
+        .entries
+        .iter()
+        .any(|entry| entry.relative_path == PathBuf::from("target.txt")));
 }

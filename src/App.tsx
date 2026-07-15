@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -22,6 +22,8 @@ import {
   RefreshCw,
   FolderClosed,
   FolderLock,
+  Eye,
+  EyeOff,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -128,6 +130,31 @@ function InlineFormNotice({ notice }: { notice?: Notice }): ReactElement {
 function inputStateClass(invalid: boolean): string | undefined {
   return invalid ? "is-invalid" : undefined;
 }
+
+const PasswordInput = forwardRef<
+  HTMLInputElement,
+  Omit<ComponentPropsWithoutRef<"input">, "type">
+>(function PasswordInput({ className, disabled, ...props }, ref): ReactElement {
+  const [visible, setVisible] = useState(false);
+  const VisibilityIcon = visible ? EyeOff : Eye;
+  const action = visible ? "Hide password" : "Show password";
+  return (
+    <span className="password-input">
+      <input {...props} ref={ref} className={className} disabled={disabled} type={visible ? "text" : "password"} />
+      <button
+        type="button"
+        className="password-visibility-toggle icon-button"
+        aria-label={action}
+        title={action}
+        aria-pressed={visible}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setVisible((current) => !current)}
+      >
+        <VisibilityIcon />
+      </button>
+    </span>
+  );
+});
 
 function IconButton({
   icon: Icon,
@@ -717,7 +744,7 @@ function NewRepositoryPage({
         {encryptionAlgorithm !== "none" ? (
           <label>
             Encryption password
-            <input
+            <PasswordInput
               className={inputStateClass(invalidFields.has("encryptionPassword"))}
               value={encryptionPassword}
               onChange={(event) => {
@@ -725,7 +752,6 @@ function NewRepositoryPage({
                 clearInvalid("encryptionPassword");
               }}
               disabled={busy}
-              type="password"
               autoComplete="new-password"
             />
           </label>
@@ -1010,6 +1036,7 @@ function SourceList({
 function AddSnapshotPage({
   repository,
   draft,
+  sessionEncryptionPassword,
   notice,
   busy,
   onBrowseSource,
@@ -1020,22 +1047,40 @@ function AddSnapshotPage({
 }: {
   repository: RepositoryRecord;
   draft: RepositoryWorkspace;
+  sessionEncryptionPassword: string;
   notice?: Notice;
   busy: boolean;
   onBrowseSource: () => void;
   onChangeDraft: <K extends keyof RepositoryWorkspace>(field: K, value: RepositoryWorkspace[K]) => void;
   onChangeFilter: <K extends keyof BackupFilterDraft>(field: K, value: BackupFilterDraft[K]) => void;
   onRemoveSource: (index: number) => void;
-  onSubmit: () => Promise<boolean>;
+  onSubmit: (encryptionPassword: string) => Promise<boolean>;
 }): ReactElement {
-  type AddField = "sources" | "pathRegex" | "owner" | "minSize" | "maxSize" | "modifiedAfter" | "modifiedBefore";
+  type AddField =
+    | "sources"
+    | "encryptionPassword"
+    | "pathRegex"
+    | "owner"
+    | "minSize"
+    | "maxSize"
+    | "modifiedAfter"
+    | "modifiedBefore";
   const [invalidFields, setInvalidFields] = useState<Set<AddField>>(() => new Set());
+  const [draftEncryptionPassword, setDraftEncryptionPassword] = useState("");
+  const effectiveEncryptionPassword = sessionEncryptionPassword || draftEncryptionPassword;
+
+  useEffect(() => {
+    setDraftEncryptionPassword("");
+  }, [repository.path]);
 
   function validate(): FormValidation<AddField> | undefined {
     const fields: AddField[] = [];
     const minimum = draft.filter.minSize ? Number(draft.filter.minSize) : undefined;
     const maximum = draft.filter.maxSize ? Number(draft.filter.maxSize) : undefined;
     if (draft.sourcePaths.length === 0) fields.push("sources");
+    if (repository.encryptionAlgorithm !== "none" && draft.encryptSnapshot && !effectiveEncryptionPassword) {
+      fields.push("encryptionPassword");
+    }
     if (draft.filter.pathRegex.trim()) {
       try {
         new RegExp(draft.filter.pathRegex);
@@ -1087,7 +1132,7 @@ function AddSnapshotPage({
           setInvalidFields(new Set(validation.fields));
           return;
         }
-        const succeeded = await onSubmit();
+        const succeeded = await onSubmit(effectiveEncryptionPassword);
         if (succeeded) setInvalidFields(new Set());
       }}
     >
@@ -1136,6 +1181,24 @@ function AddSnapshotPage({
               <option value="false">No</option>
               <option value="true">Yes</option>
             </select>
+          </label>
+        ) : null}
+        {repository.encryptionAlgorithm !== "none" && draft.encryptSnapshot && sessionEncryptionPassword ? (
+          <p className="form-field-note full-row">Repository password is available for this session.</p>
+        ) : null}
+        {repository.encryptionAlgorithm !== "none" && draft.encryptSnapshot && !sessionEncryptionPassword ? (
+          <label className="full-row">
+            Encryption password
+            <PasswordInput
+              className={inputStateClass(invalidFields.has("encryptionPassword"))}
+              value={draftEncryptionPassword}
+              disabled={busy}
+              onChange={(event) => {
+                setDraftEncryptionPassword(event.target.value);
+                clearInvalid("encryptionPassword");
+              }}
+              autoComplete="current-password"
+            />
           </label>
         ) : null}
       </div>
@@ -1285,8 +1348,12 @@ function RepositorySettingsPage({
   const [invalidName, setInvalidName] = useState(false);
   const [invalidPassword, setInvalidPassword] = useState(false);
   const [invalidPasswordChangeFields, setInvalidPasswordChangeFields] = useState<Set<"oldPassword" | "newPassword" | "confirmPassword">>(() => new Set());
+  const [passwordChangeError, setPasswordChangeError] = useState<"missing" | "mismatch" | undefined>();
   const [invalidDeletePassword, setInvalidDeletePassword] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const oldPasswordInput = useRef<HTMLInputElement>(null);
+  const newPasswordInput = useRef<HTMLInputElement>(null);
+  const confirmPasswordInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setName(repository.name);
@@ -1298,6 +1365,7 @@ function RepositorySettingsPage({
     setInvalidName(false);
     setInvalidPassword(false);
     setInvalidPasswordChangeFields(new Set());
+    setPasswordChangeError(undefined);
     setInvalidDeletePassword(false);
     setConfirmDelete(false);
   }, [repository.path, repository.name]);
@@ -1335,25 +1403,35 @@ function RepositorySettingsPage({
       next.delete(field);
       return next;
     });
+    setPasswordChangeError(undefined);
   }
 
   async function changePassword(): Promise<void> {
+    // Password managers may populate inputs without dispatching React's change event.
+    const currentOldPassword = oldPasswordInput.current?.value ?? oldPassword;
+    const currentNewPassword = newPasswordInput.current?.value ?? newPassword;
+    const currentConfirmPassword = confirmPasswordInput.current?.value ?? confirmPassword;
     const fields: Array<"oldPassword" | "newPassword" | "confirmPassword"> = [];
-    if (!oldPassword) fields.push("oldPassword");
-    if (!newPassword) fields.push("newPassword");
-    if (newPassword !== confirmPassword) fields.push("confirmPassword");
+    if (!currentOldPassword) fields.push("oldPassword");
+    if (!currentNewPassword) fields.push("newPassword");
+    const confirmationDiffers = currentNewPassword !== currentConfirmPassword;
+    const passwordsMismatch = Boolean(currentNewPassword) && Boolean(currentConfirmPassword) && confirmationDiffers;
+    if (confirmationDiffers) fields.push("confirmPassword");
     if (fields.length > 0) {
       setInvalidPasswordChangeFields(new Set(fields));
+      setPasswordChangeError(passwordsMismatch ? "mismatch" : "missing");
       return;
     }
-    const succeeded = await onChangePassword(oldPassword, newPassword);
+    const succeeded = await onChangePassword(currentOldPassword, currentNewPassword);
     if (succeeded) {
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
       setInvalidPasswordChangeFields(new Set());
+      setPasswordChangeError(undefined);
     } else {
       setInvalidPasswordChangeFields(new Set(["oldPassword"]));
+      setPasswordChangeError(undefined);
     }
   }
 
@@ -1391,17 +1469,26 @@ function RepositorySettingsPage({
         <div className="unlock-zone">
           <label>
             Encryption password
-            <input
+            {repositoryUnlocked ? (
+              <input
               className={inputStateClass(invalidPassword)}
-              value={repositoryUnlocked ? "Repository unlocked" : unlockPassword}
-              disabled={busy || repositoryUnlocked}
+              value="Repository unlocked"
+              disabled
+              type="text"
+              autoComplete="off"
+            />
+            ) : (
+              <PasswordInput
+              className={inputStateClass(invalidPassword)}
+              value={unlockPassword}
+              disabled={busy}
               onChange={(event) => {
                 setUnlockPassword(event.target.value);
                 setInvalidPassword(false);
               }}
-              type={repositoryUnlocked ? "text" : "password"}
               autoComplete="current-password"
-            />
+              />
+            )}
           </label>
           <div className="form-actions">
             <InlineFormNotice
@@ -1424,7 +1511,8 @@ function RepositorySettingsPage({
           <h2>Change password</h2>
           <label>
             Old password
-            <input
+            <PasswordInput
+              ref={oldPasswordInput}
               className={inputStateClass(invalidPasswordChangeFields.has("oldPassword"))}
               value={oldPassword}
               disabled={busy}
@@ -1432,13 +1520,13 @@ function RepositorySettingsPage({
                 setOldPassword(event.target.value);
                 clearPasswordChangeInvalid("oldPassword");
               }}
-              type="password"
               autoComplete="current-password"
             />
           </label>
           <label>
             New password
-            <input
+            <PasswordInput
+              ref={newPasswordInput}
               className={inputStateClass(invalidPasswordChangeFields.has("newPassword"))}
               value={newPassword}
               disabled={busy}
@@ -1446,13 +1534,13 @@ function RepositorySettingsPage({
                 setNewPassword(event.target.value);
                 clearPasswordChangeInvalid("newPassword");
               }}
-              type="password"
               autoComplete="new-password"
             />
           </label>
           <label>
             Confirm new password
-            <input
+            <PasswordInput
+              ref={confirmPasswordInput}
               className={inputStateClass(invalidPasswordChangeFields.has("confirmPassword"))}
               value={confirmPassword}
               disabled={busy}
@@ -1460,16 +1548,17 @@ function RepositorySettingsPage({
                 setConfirmPassword(event.target.value);
                 clearPasswordChangeInvalid("confirmPassword");
               }}
-              type="password"
               autoComplete="new-password"
             />
           </label>
           <div className="form-actions">
             <InlineFormNotice
               notice={
-                invalidPasswordChangeFields.size > 0
-                  ? { tone: "error", message: "Fill in the highlighted password fields." }
-                  : undefined
+                passwordChangeError === "mismatch"
+                  ? { tone: "error", message: "New password and confirmation do not match." }
+                  : passwordChangeError === "missing"
+                    ? { tone: "error", message: "Fill in the highlighted password fields." }
+                    : undefined
               }
             />
             <button type="button" className="primary-button" disabled={busy} onClick={() => void changePassword()}>
@@ -1491,7 +1580,7 @@ function RepositorySettingsPage({
             {repository.encryptionAlgorithm !== "none" ? (
               <label>
                 Encryption password
-                <input
+                <PasswordInput
                   className={inputStateClass(invalidDeletePassword)}
                   value={deletePassword}
                   disabled={busy}
@@ -1499,7 +1588,6 @@ function RepositorySettingsPage({
                     setDeletePassword(event.target.value);
                     setInvalidDeletePassword(false);
                   }}
-                  type="password"
                   autoComplete="current-password"
                 />
               </label>
@@ -1620,7 +1708,7 @@ function RestoreSnapshotPage({
       {snapshot.hasEncryptedObjects ? (
         <label>
           Decryption password
-          <input
+          <PasswordInput
             className={inputStateClass(invalidPassword)}
             value={decryptionPassword}
             disabled={busy}
@@ -1628,7 +1716,6 @@ function RestoreSnapshotPage({
               onPasswordChange(event.target.value);
               setInvalidPassword(false);
             }}
-            type="password"
             autoComplete="current-password"
           />
         </label>
@@ -1678,7 +1765,7 @@ function DeleteSnapshotPage({
       {snapshot.hasEncryptedObjects ? (
         <label>
           Encryption password
-          <input
+          <PasswordInput
             className={inputStateClass(invalidPassword)}
             value={password}
             disabled={busy}
@@ -1686,7 +1773,6 @@ function DeleteSnapshotPage({
               setPassword(event.target.value);
               setInvalidPassword(false);
             }}
-            type="password"
             autoComplete="current-password"
           />
         </label>
@@ -1733,6 +1819,7 @@ export function App(): ReactElement {
     let cancelled = false;
     async function bootstrap(): Promise<void> {
       const loaded = await loadState();
+      let metadataChanged = false;
       if ("__TAURI_INTERNALS__" in window) {
         await Promise.all(
           loaded.repositories
@@ -1740,8 +1827,14 @@ export function App(): ReactElement {
             .map(async (repository) => {
               try {
                 const info = await repositoryApi.open(repository.path);
-                repository.name = info.name;
-                repository.encryptionAlgorithm = info.encryptionAlgorithm;
+                if (
+                  repository.name !== info.name ||
+                  repository.encryptionAlgorithm !== info.encryptionAlgorithm
+                ) {
+                  repository.name = info.name;
+                  repository.encryptionAlgorithm = info.encryptionAlgorithm;
+                  metadataChanged = true;
+                }
               } catch {
                 setUnavailable((current) => new Set(current).add(repository.path));
               }
@@ -1757,7 +1850,10 @@ export function App(): ReactElement {
           if (!cancelled) setUnavailable((current) => new Set(current).add(active.path));
         }
       }
-      if (!cancelled) setState(loaded);
+      if (!cancelled) {
+        setState(loaded);
+        if (metadataChanged) scheduleStateSave(loaded);
+      }
     }
     void bootstrap().catch((error) => {
       setGlobalNotice({ tone: "error", message: `BackupTool failed to start: ${String(error)}` });
@@ -2126,6 +2222,7 @@ function closeWorkspaceModal(): void {
         <AddSnapshotPage
           repository={active}
           draft={workspace}
+          sessionEncryptionPassword={repositoryPasswords[active.path] ?? ""}
           notice={workspaceNotice("add")}
           busy={busy === "backup"}
           onBrowseSource={async () => {
@@ -2145,7 +2242,7 @@ function closeWorkspaceModal(): void {
           onRemoveSource={(index) => updateWorkspace(active.path, (draft) => {
             draft.sourcePaths.splice(index, 1);
           })}
-          onSubmit={async () => {
+          onSubmit={async (encryptionPassword) => {
             setBusy("backup");
             setNotice(active.path, "add", { tone: "info", message: "Adding snapshot..." });
             try {
@@ -2155,9 +2252,12 @@ function closeWorkspaceModal(): void {
                 filter: workspace.filter,
                 compressionAlgorithm: workspace.compressionAlgorithm,
                 encryptSnapshot: active.encryptionAlgorithm !== "none" && workspace.encryptSnapshot,
-                encryptionPassword: repositoryPasswords[active.path] ?? "",
+                encryptionPassword,
                 snapshotTitle: workspace.snapshotTitle,
               });
+              if (active.encryptionAlgorithm !== "none" && workspace.encryptSnapshot && encryptionPassword) {
+                setRepositoryPasswords((current) => ({ ...current, [active.path]: encryptionPassword }));
+              }
               updateWorkspace(active.path, (draft) => {
                 draft.snapshotTitle = "";
                 draft.route = { kind: "overview" };
@@ -2172,6 +2272,14 @@ function closeWorkspaceModal(): void {
               closeWorkspaceModal();
               return true;
             } catch (error) {
+              if (String(error).includes("failed to unlock repository")) {
+                setRepositoryPasswords((current) => {
+                  if (!(active.path in current)) return current;
+                  const next = { ...current };
+                  delete next[active.path];
+                  return next;
+                });
+              }
               setNotice(active.path, "add", { tone: "error", message: String(error) });
               return false;
             } finally {
@@ -2336,7 +2444,11 @@ function closeWorkspaceModal(): void {
                     flattenConflictStrategy: workspace.flattenConflictStrategy,
                     decryptionPassword,
                   });
-                  setNotice(active.path, "restore", { tone: "success", message: `Restored ${result.fileCount} files (${formatBytes(result.byteCount)}).` });
+                  const warningText = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
+                  setNotice(active.path, "restore", {
+                    tone: result.warnings.length > 0 ? "warning" : "success",
+                    message: `Restored ${result.fileCount} files (${formatBytes(result.byteCount)}).${warningText}`,
+                  });
                   return true;
                 } catch (error) {
                   setNotice(active.path, "restore", { tone: "error", message: String(error) });
