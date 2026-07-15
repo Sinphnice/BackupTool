@@ -19,6 +19,7 @@ BackupTool 是一个基于 Tauri 2、React 和 Rust 的桌面备份工具。项�
 - 冲突处理策略：`Error`、`Skip`、`Overwrite`、`Rename`，默认 `Rename`。
 - 对象级压缩：支持 `none` 和 `zstd`，压缩只作用于 object payload。
 - 对象级加密：支持未加密 object 和 AES-256-GCM 加密 object 共存。
+- 自动完整性校验：object 记录原始文件数据的 CRC32，恢复时自动校验文件内容是否完整。
 - 仓库密码管理：加密仓库使用 Argon2id 从用户密码派生密钥，用于解封装仓库主密钥；支持修改仓库密码。
 - 安全导入导出：支持将完整 repository 导出为 `.tar`，也可以从 `.tar` 导入为 repository。
 - 快照删除：删除 snapshot 文件，并清理不再被其他 snapshot 引用的 object。

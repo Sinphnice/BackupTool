@@ -950,7 +950,9 @@ fn zstd_backup_stores_compressed_object_and_restores_original_content() {
             .all(|value| value.is_ascii_digit() || ('a'..='f').contains(&value)));
         let object_path = repository_path.join("objects").join(object_id.as_str());
         assert!(object_path.exists());
-        assert!(object_header_text(&object_path).contains("compression\tzstd"));
+        let header = object_header_text(&object_path);
+        assert!(header.contains("compression\tzstd"));
+        assert!(header.contains("crc32\t"));
         assert!(!repository_path
             .join("objects")
             .join(format!("{}.zst", object_id.as_str()))
@@ -1136,9 +1138,7 @@ fn encrypted_restore_requires_correct_password() {
             },
         )
         .unwrap_err();
-    assert!(wrong
-        .to_string()
-        .contains("failed to unlock repository"));
+    assert!(wrong.to_string().contains("failed to unlock repository"));
 }
 
 #[test]
@@ -1148,7 +1148,9 @@ fn encrypted_repository_can_reopen_and_unlock_master_key() {
     encrypted_repository(&repository_path, "password");
 
     let reopened = Repository::open(&repository_path).unwrap();
-    reopened.verify_encryption_password(Some("password")).unwrap();
+    reopened
+        .verify_encryption_password(Some("password"))
+        .unwrap();
     let error = reopened
         .verify_encryption_password(Some("wrong-password"))
         .unwrap_err();
@@ -1387,9 +1389,7 @@ fn encrypted_object_rejects_a_different_password_without_overwriting() {
             },
         )
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("failed to unlock repository"));
+    assert!(error.to_string().contains("failed to unlock repository"));
 
     repository
         .reader()
@@ -1468,7 +1468,8 @@ fn object_id_uses_content_hash_and_encryption_state() {
         .unwrap();
     let plain_object = first_file_object_id(&plain_repository, &plain_snapshot.id);
 
-    let encrypted_repository = encrypted_repository(root.path.join("encrypted_repository"), "password");
+    let encrypted_repository =
+        encrypted_repository(root.path.join("encrypted_repository"), "password");
     let encrypted_snapshot = encrypted_repository
         .writer()
         .backup_with_options(
@@ -1607,7 +1608,7 @@ fn snapshot_entry_does_not_store_compression_algorithm() {
     let text = fs::read_to_string(&snapshot_path).unwrap();
 
     for line in text.lines().filter(|line| line.starts_with("entry\t")) {
-        assert_eq!(line.split('\t').count(), 12);
+        assert_eq!(line.split('\t').count(), 13);
         assert!(!line.contains("\tzstd"));
         assert!(!line.contains("\tnone"));
     }
@@ -1759,7 +1760,7 @@ fn object_payload_size_mismatch_returns_error() {
     let object_id = first_file_object_id(&repository, &snapshot.id);
     fs::write(
         repository_path.join("objects").join(object_id.as_str()),
-        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\noriginal_size\t5\npayload_size\t99\n\nalpha",
+        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\ncrc32\td0e0396a\noriginal_size\t5\npayload_size\t99\n\nalpha",
     )
     .unwrap();
 
@@ -1788,7 +1789,7 @@ fn object_original_size_mismatch_returns_error() {
     let object_id = first_file_object_id(&repository, &snapshot.id);
     fs::write(
         repository_path.join("objects").join(object_id.as_str()),
-        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\noriginal_size\t99\npayload_size\t5\n\nalpha",
+        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\ncrc32\td0e0396a\noriginal_size\t99\npayload_size\t5\n\nalpha",
     )
     .unwrap();
 
@@ -1798,6 +1799,35 @@ fn object_original_size_mismatch_returns_error() {
         .unwrap_err();
 
     assert!(error.to_string().contains("object original size mismatch"));
+}
+
+#[test]
+fn object_crc32_mismatch_returns_error() {
+    let root = TestDir::new("repo_object_bad_crc32");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "alpha").unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let object_id = first_file_object_id(&repository, &snapshot.id);
+    fs::write(
+        repository_path.join("objects").join(object_id.as_str()),
+        "backup-tool object v1\ncompression\tnone\nencryption\tnone\nkey_id\t\nnonce\t\ncrc32\td0e0396a\noriginal_size\t5\npayload_size\t5\n\nbravo",
+    )
+    .unwrap();
+
+    let error = repository
+        .reader()
+        .restore(&snapshot.id, &restore)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("object CRC32 mismatch"));
 }
 
 #[test]
@@ -1970,7 +2000,12 @@ fn backs_up_and_restores_symlink_and_fifo_nodes() {
     let fifo_path = source.join("pipe");
     let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
     let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
-    assert_eq!(result, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+    assert_eq!(
+        result,
+        0,
+        "mkfifo failed: {}",
+        std::io::Error::last_os_error()
+    );
 
     let repository = Repository::init(&repository_path).unwrap();
     let snapshot = repository
@@ -1985,7 +2020,10 @@ fn backs_up_and_restores_symlink_and_fifo_nodes() {
         .find(|entry| entry.relative_path == PathBuf::from("link.txt"))
         .unwrap();
     assert_eq!(symlink_entry.kind, FileKind::Symlink);
-    assert_eq!(symlink_entry.link_target.as_deref(), Some(Path::new("target.txt")));
+    assert_eq!(
+        symlink_entry.link_target.as_deref(),
+        Some(Path::new("target.txt"))
+    );
     assert!(symlink_entry.object_id.is_none());
 
     let fifo_entry = snapshot_file
@@ -2001,11 +2039,76 @@ fn backs_up_and_restores_symlink_and_fifo_nodes() {
         .restore(&snapshot.id, &restore, RestoreOptions::default())
         .unwrap();
 
-    assert_eq!(fs::read_link(restore.join("link.txt")).unwrap(), PathBuf::from("target.txt"));
+    assert_eq!(
+        fs::read_link(restore.join("link.txt")).unwrap(),
+        PathBuf::from("target.txt")
+    );
     assert!(fs::symlink_metadata(restore.join("pipe"))
         .unwrap()
         .file_type()
         .is_fifo());
+}
+
+#[cfg(unix)]
+#[test]
+fn backs_up_and_restores_hard_link_relationships() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = TestDir::new("repo_hard_links");
+    let repository_path = root.path.join("repository");
+    let source = root.path.join("source");
+    let restore = root.path.join("restore");
+    let regular_dir = source.join("regular");
+    let hardlinks_dir = source.join("hardlinks");
+    fs::create_dir_all(&regular_dir).unwrap();
+    fs::create_dir_all(&hardlinks_dir).unwrap();
+    let original = regular_dir.join("file.txt");
+    let linked = hardlinks_dir.join("file-hardlink.txt");
+    fs::write(&original, "shared inode data").unwrap();
+    fs::hard_link(&original, &linked).unwrap();
+
+    let repository = Repository::init(&repository_path).unwrap();
+    let snapshot = repository
+        .writer()
+        .backup(&source, &BackupFilter::default())
+        .unwrap();
+    let snapshot_file = repository.reader().read_snapshot(&snapshot.id).unwrap();
+    let linked_entries = snapshot_file
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == FileKind::File
+                && (entry.relative_path == PathBuf::from("regular").join("file.txt")
+                    || entry.relative_path == PathBuf::from("hardlinks").join("file-hardlink.txt"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(linked_entries.len(), 2);
+    assert_eq!(
+        linked_entries
+            .iter()
+            .filter(|entry| entry.hard_link_target.is_some())
+            .count(),
+        1
+    );
+
+    repository.reader().restore(&snapshot.id, &restore).unwrap();
+
+    let restored_original = restore.join("regular").join("file.txt");
+    let restored_linked = restore.join("hardlinks").join("file-hardlink.txt");
+    assert_eq!(
+        fs::read_to_string(&restored_original).unwrap(),
+        "shared inode data"
+    );
+    assert_eq!(
+        fs::read_to_string(&restored_linked).unwrap(),
+        "shared inode data"
+    );
+    let original_metadata = fs::metadata(&restored_original).unwrap();
+    let linked_metadata = fs::metadata(&restored_linked).unwrap();
+    assert_eq!(original_metadata.dev(), linked_metadata.dev());
+    assert_eq!(original_metadata.ino(), linked_metadata.ino());
+    assert_eq!(original_metadata.nlink(), 2);
+    assert_eq!(linked_metadata.nlink(), 2);
 }
 
 #[cfg(unix)]
@@ -2024,7 +2127,12 @@ fn path_regex_filters_symlink_and_fifo_nodes() {
     let fifo_path = source.join("pipe");
     let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
     let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
-    assert_eq!(result, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+    assert_eq!(
+        result,
+        0,
+        "mkfifo failed: {}",
+        std::io::Error::last_os_error()
+    );
 
     let snapshot = repository
         .writer()
@@ -2041,7 +2149,8 @@ fn path_regex_filters_symlink_and_fifo_nodes() {
     assert!(snapshot_file
         .entries
         .iter()
-        .any(|entry| entry.relative_path == PathBuf::from("link.txt") && entry.kind == FileKind::Symlink));
+        .any(|entry| entry.relative_path == PathBuf::from("link.txt")
+            && entry.kind == FileKind::Symlink));
     assert!(snapshot_file
         .entries
         .iter()

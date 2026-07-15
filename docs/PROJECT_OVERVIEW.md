@@ -29,6 +29,7 @@ React TypeScript GUI
 - `Error`、`Skip`、`Overwrite`、`Rename` 四种冲突策略。
 - object 级 `none` / `zstd` 压缩。
 - object 级 AES-256-GCM 加密。
+- object 级 CRC32 完整性校验。
 - repository 导出为 `.tar`，以及从 `.tar` 安全导入。
 - 仓库中心化 React GUI。
 - Rust core、Tauri command 和前端状态测试。
@@ -101,6 +102,8 @@ Rust 依赖由 Cargo workspace 管理：
 - `rand`：生成 salt、nonce 和仓库主密钥。
 - `hex`：编码二进制密钥材料元数据。
 - `tar`：repository 导出和导入。
+
+CRC32 当前由 `backup-core` 内部实现，用于 object 级完整性校验，没有引入额外 crate。
 
 ## 4. 架构原则
 
@@ -244,6 +247,7 @@ compression    none|zstd
 encryption     none|aes-256-gcm
 key_id         <repository key id or empty>
 nonce          <hex nonce or empty>
+crc32          <8 hex digits>
 original_size  <u64>
 payload_size   <u64>
 
@@ -254,6 +258,7 @@ payload_size   <u64>
 
 ```text
 raw bytes
+    -> CRC32 over raw bytes
     -> optional zstd compression
         -> optional AES-256-GCM encryption
             -> object header + payload
@@ -265,10 +270,13 @@ raw bytes
 object header + payload
     -> optional AES-256-GCM decryption
         -> optional zstd decompression
+            -> CRC32 verification over raw bytes
             -> raw bytes
 ```
 
-压缩和加密都只处理 payload，不处理 object header。
+`crc32` 记录的是原始文件数据的 CRC32，不是压缩后或加密后的 payload CRC。恢复时先完成解密和解压，再对得到的原始 bytes 重新计算 CRC32；如果不一致，恢复会返回错误并停止写出该 object 对应的文件。
+
+压缩、加密和 CRC 校验都围绕 object payload 工作；object header 本身保持明文自描述格式。
 
 ## 9. 加密模型
 

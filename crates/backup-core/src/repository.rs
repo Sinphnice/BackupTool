@@ -9,7 +9,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -148,8 +148,15 @@ pub struct SnapshotEntry {
     pub size: u64,
     pub modified_unix_seconds: Option<i64>,
     pub object_id: Option<ObjectId>,
+    pub hard_link_target: Option<HardLinkTarget>,
     pub link_target: Option<PathBuf>,
     pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardLinkTarget {
+    pub source_index: usize,
+    pub relative_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +284,11 @@ impl Repository {
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("indexes"))?;
         let display_name = normalize_repository_display_name(display_name)
-            .or_else(|| root.file_name().and_then(|value| value.to_str()).map(ToOwned::to_owned))
+            .or_else(|| {
+                root.file_name()
+                    .and_then(|value| value.to_str())
+                    .map(ToOwned::to_owned)
+            })
             .unwrap_or_else(|| root.display().to_string());
         let metadata = RepositoryMetadata::new(
             display_name,
@@ -314,9 +325,10 @@ impl Repository {
 
     pub fn set_display_name(&self, display_name: String) -> BackupCoreResult<RepositoryMetadata> {
         let mut metadata = self.metadata()?;
-        metadata.display_name = normalize_repository_display_name(Some(display_name)).ok_or_else(|| {
-            BackupError::InvalidRepository("repository display name must not be empty".into())
-        })?;
+        metadata.display_name =
+            normalize_repository_display_name(Some(display_name)).ok_or_else(|| {
+                BackupError::InvalidRepository("repository display name must not be empty".into())
+            })?;
         write_repository_metadata(&self.root.join("repo.meta"), &metadata)?;
         Ok(metadata)
     }
@@ -340,9 +352,14 @@ impl Repository {
         let meta_path = self.root.join("repo.meta");
         let temp_path = self.root.join("repo.meta.tmp");
         write_repository_metadata(&temp_path, &updated).map_err(|error| {
-            BackupError::InvalidRepository(format!("failed to write temporary repo metadata: {error}"))
+            BackupError::InvalidRepository(format!(
+                "failed to write temporary repo metadata: {error}"
+            ))
         })?;
-        let file = fs::OpenOptions::new().read(true).write(true).open(&temp_path)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temp_path)?;
         file.sync_all()?;
         drop(file);
         read_repository_metadata(&temp_path)?.verify_encryption_password(Some(new_password))?;
@@ -534,10 +551,16 @@ impl RepositoryMetadata {
                 let nonce = random_bytes(AES_GCM_NONCE_LEN);
                 let key_id = hex::encode(random_bytes(KEY_ID_LEN));
                 let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, &salt)?)
-                    .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
+                    .map_err(|_| {
+                        BackupError::InvalidRepository("failed to create repository cipher".into())
+                    })?;
                 let wrapped_master_key = cipher
                     .encrypt(Nonce::from_slice(&nonce), master_key.as_slice())
-                    .map_err(|_| BackupError::InvalidRepository("failed to wrap repository master key".into()))?;
+                    .map_err(|_| {
+                        BackupError::InvalidRepository(
+                            "failed to wrap repository master key".into(),
+                        )
+                    })?;
                 Ok(Self {
                     display_name,
                     encryption_algorithm,
@@ -558,7 +581,10 @@ impl RepositoryMetadata {
         self.unlock_master_key(password).map(|_| ())
     }
 
-    fn unlock_master_key(&self, password: Option<&str>) -> BackupCoreResult<Option<RepositoryMasterKey>> {
+    fn unlock_master_key(
+        &self,
+        password: Option<&str>,
+    ) -> BackupCoreResult<Option<RepositoryMasterKey>> {
         match self.encryption_algorithm {
             EncryptionAlgorithm::None => {
                 self.validate_structure()?;
@@ -574,15 +600,21 @@ impl RepositoryMetadata {
                     BackupError::InvalidRepository("encrypted repository missing nonce".into())
                 })?;
                 let wrapped_master_key = self.wrapped_master_key.as_deref().ok_or_else(|| {
-                    BackupError::InvalidRepository("encrypted repository missing wrapped master key".into())
-                })?;
-                let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, salt)?)
-                    .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
-                let decrypted = cipher.decrypt(Nonce::from_slice(nonce), wrapped_master_key).map_err(|_| {
                     BackupError::InvalidRepository(
-                        "failed to unlock repository; password may be incorrect".into(),
+                        "encrypted repository missing wrapped master key".into(),
                     )
                 })?;
+                let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(password, salt)?)
+                    .map_err(|_| {
+                        BackupError::InvalidRepository("failed to create repository cipher".into())
+                    })?;
+                let decrypted = cipher
+                    .decrypt(Nonce::from_slice(nonce), wrapped_master_key)
+                    .map_err(|_| {
+                        BackupError::InvalidRepository(
+                            "failed to unlock repository; password may be incorrect".into(),
+                        )
+                    })?;
                 if decrypted.len() != REPOSITORY_MASTER_KEY_LEN {
                     return Err(BackupError::InvalidRepository(
                         "invalid repository master key length".into(),
@@ -608,10 +640,14 @@ impl RepositoryMetadata {
         let salt = random_bytes(ARGON2_SALT_LEN);
         let nonce = random_bytes(AES_GCM_NONCE_LEN);
         let cipher = Aes256Gcm::new_from_slice(&derive_encryption_key(new_password, &salt)?)
-            .map_err(|_| BackupError::InvalidRepository("failed to create repository cipher".into()))?;
+            .map_err(|_| {
+                BackupError::InvalidRepository("failed to create repository cipher".into())
+            })?;
         let wrapped_master_key = cipher
             .encrypt(Nonce::from_slice(&nonce), master_key.key.as_slice())
-            .map_err(|_| BackupError::InvalidRepository("failed to wrap repository master key".into()))?;
+            .map_err(|_| {
+                BackupError::InvalidRepository("failed to wrap repository master key".into())
+            })?;
         Ok(Self {
             display_name: self.display_name.clone(),
             encryption_algorithm: self.encryption_algorithm,
@@ -713,14 +749,21 @@ fn normalize_repository_display_name(value: Option<String>) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    Some(value.chars().take(REPOSITORY_DISPLAY_NAME_MAX_CHARS).collect())
+    Some(
+        value
+            .chars()
+            .take(REPOSITORY_DISPLAY_NAME_MAX_CHARS)
+            .collect(),
+    )
 }
 
 fn read_repository_metadata(path: &Path) -> BackupCoreResult<RepositoryMetadata> {
     let text = fs::read_to_string(path)?;
     let mut lines = text.lines();
     if lines.next() != Some(REPOSITORY_META.trim_end()) {
-        return Err(BackupError::InvalidRepository("invalid repo.meta header".into()));
+        return Err(BackupError::InvalidRepository(
+            "invalid repo.meta header".into(),
+        ));
     }
 
     let mut display_name = None;
@@ -744,7 +787,9 @@ fn read_repository_metadata(path: &Path) -> BackupCoreResult<RepositoryMetadata>
         };
         match key {
             "display_name" => display_name = Some(unescape_field(value)?),
-            "encryption" => encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?),
+            "encryption" => {
+                encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?)
+            }
             "key_format_version" => {
                 format_version = Some(value.parse::<u16>().map_err(|_| {
                     BackupError::InvalidRepository(format!(
@@ -760,7 +805,13 @@ fn read_repository_metadata(path: &Path) -> BackupCoreResult<RepositoryMetadata>
             "wrapped_master_key" => {
                 wrapped_master_key = parse_optional_hex(value, "repository wrapped master key")?
             }
-            "key_id" => key_id = if value.is_empty() { None } else { Some(value.to_string()) },
+            "key_id" => {
+                key_id = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            }
             _ => {}
         }
     }
@@ -817,7 +868,13 @@ fn write_repository_metadata(path: &Path, metadata: &RepositoryMetadata) -> Back
     output.push_str(&metadata.nonce.as_ref().map(hex::encode).unwrap_or_default());
     output.push('\n');
     output.push_str("wrapped_master_key\t");
-    output.push_str(&metadata.wrapped_master_key.as_ref().map(hex::encode).unwrap_or_default());
+    output.push_str(
+        &metadata
+            .wrapped_master_key
+            .as_ref()
+            .map(hex::encode)
+            .unwrap_or_default(),
+    );
     output.push('\n');
     output.push_str("key_id\t");
     output.push_str(metadata.key_id.as_deref().unwrap_or_default());
@@ -1028,6 +1085,7 @@ struct ObjectHeader {
     encryption_algorithm: EncryptionAlgorithm,
     key_id: Option<String>,
     nonce: Option<Vec<u8>>,
+    crc32: u32,
     original_size: u64,
     payload_size: u64,
     header_len: usize,
@@ -1046,7 +1104,7 @@ fn encode_object(
     }?;
     let encrypted = encrypt_payload(&compressed, encryption_algorithm, master_key)?;
     let header = format!(
-        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\nencryption\t{}\nkey_id\t{}\nnonce\t{}\noriginal_size\t{}\npayload_size\t{}\n\n",
+        "{OBJECT_HEADER_MAGIC}\ncompression\t{}\nencryption\t{}\nkey_id\t{}\nnonce\t{}\ncrc32\t{:08x}\noriginal_size\t{}\npayload_size\t{}\n\n",
         compression_algorithm.as_object_value(),
         encryption_algorithm.as_object_value(),
         encrypted
@@ -1059,6 +1117,7 @@ fn encode_object(
             .as_ref()
             .map(hex::encode)
             .unwrap_or_default(),
+        crc32(bytes),
         bytes.len(),
         encrypted.payload.len()
     );
@@ -1068,7 +1127,10 @@ fn encode_object(
     Ok(output)
 }
 
-fn decode_object(bytes: &[u8], master_key: Option<&RepositoryMasterKey>) -> BackupCoreResult<Vec<u8>> {
+fn decode_object(
+    bytes: &[u8],
+    master_key: Option<&RepositoryMasterKey>,
+) -> BackupCoreResult<Vec<u8>> {
     let header = read_object_header(bytes)?;
     let payload = &bytes[header.header_len..];
     if payload.len() != usize::try_from(header.payload_size).unwrap_or(usize::MAX) {
@@ -1091,6 +1153,13 @@ fn decode_object(bytes: &[u8], master_key: Option<&RepositoryMasterKey>) -> Back
             "object original size mismatch: expected {}, got {}",
             header.original_size,
             decoded.len()
+        )));
+    }
+    let actual_crc32 = crc32(&decoded);
+    if actual_crc32 != header.crc32 {
+        return Err(BackupError::InvalidRepository(format!(
+            "object CRC32 mismatch: expected {:08x}, got {:08x}",
+            header.crc32, actual_crc32
         )));
     }
     Ok(decoded)
@@ -1240,6 +1309,7 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
     let mut encryption_algorithm = None;
     let mut key_id = None;
     let mut nonce = None;
+    let mut crc32 = None;
     let mut original_size = None;
     let mut payload_size = None;
     for line in lines {
@@ -1256,10 +1326,19 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
                 encryption_algorithm = Some(EncryptionAlgorithm::from_object_value(value)?);
             }
             "key_id" => {
-                key_id = if value.is_empty() { None } else { Some(value.to_string()) };
+                key_id = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
             }
             "nonce" => {
                 nonce = parse_optional_hex(value, "nonce")?;
+            }
+            "crc32" => {
+                crc32 = Some(u32::from_str_radix(value, 16).map_err(|_| {
+                    BackupError::InvalidRepository(format!("invalid object CRC32: {value}"))
+                })?);
             }
             "original_size" => {
                 original_size = Some(value.parse::<u64>().map_err(|_| {
@@ -1290,6 +1369,11 @@ fn read_object_header(bytes: &[u8]) -> BackupCoreResult<ObjectHeader> {
         })?,
         key_id,
         nonce,
+        crc32: crc32.ok_or_else(|| {
+            BackupError::InvalidRepository(
+                "object CRC32 is missing; old object format is not supported".into(),
+            )
+        })?,
         original_size: original_size.ok_or_else(|| {
             BackupError::InvalidRepository("object original size is missing".into())
         })?,
@@ -1311,6 +1395,18 @@ fn parse_optional_hex(value: &str, name: &str) -> BackupCoreResult<Option<Vec<u8
 
 fn find_header_separator(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|window| window == b"\n\n")
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 pub struct ContentHasher;
@@ -1406,6 +1502,7 @@ impl RepositoryWriter {
         } else {
             None
         };
+        let mut hard_link_targets = HashMap::new();
 
         for (source_index, source) in normalized.sources.iter().enumerate() {
             let provider = AutoFileSystemProvider::for_path(source);
@@ -1419,6 +1516,7 @@ impl RepositoryWriter {
                 options.compression_algorithm,
                 options.encryption_algorithm,
                 master_key.as_ref(),
+                &mut hard_link_targets,
                 &mut snapshot_file,
             )?;
         }
@@ -1726,6 +1824,7 @@ impl RepositoryReader {
         // Directory metadata is restored after children so restrictive source permissions
         // cannot prevent files below the directory from being created.
         let mut deferred_directory_metadata = Vec::new();
+        let mut restored_files: HashMap<(usize, PathBuf), PathBuf> = HashMap::new();
 
         for entry in &snapshot_file.entries {
             let Some(target) =
@@ -1742,26 +1841,43 @@ impl RepositoryReader {
                     }
                 }
                 FileKind::File => {
-                    let object_id = entry.object_id.as_ref().ok_or_else(|| {
-                        BackupError::InvalidSnapshot(format!(
-                            "file entry missing object id: {}",
-                            entry.relative_path.display()
-                        ))
-                    })?;
                     let target = match resolve_file_conflict(target, &options) {
                         Ok(target) => target,
                         Err(BackupError::SkipFile(_)) => continue,
                         Err(error) => return Err(error),
                     };
-                    writer.write_file(
-                        &target,
-                        &object_store.read_object_with_master_key(object_id, master_key.as_ref())?,
-                    )?;
+                    if let Some(hard_link_target) = &entry.hard_link_target {
+                        let target_key = (
+                            hard_link_target.source_index,
+                            hard_link_target.relative_path.clone(),
+                        );
+                        let original = restored_files.get(&target_key).ok_or_else(|| {
+                            BackupError::InvalidSnapshot(format!(
+                                "hard link target has not been restored: {}",
+                                hard_link_target.relative_path.display()
+                            ))
+                        })?;
+                        writer.create_hard_link(&target, original)?;
+                    } else {
+                        let object_id = entry.object_id.as_ref().ok_or_else(|| {
+                            BackupError::InvalidSnapshot(format!(
+                                "file entry missing object id: {}",
+                                entry.relative_path.display()
+                            ))
+                        })?;
+                        writer.write_file(
+                            &target,
+                            &object_store
+                                .read_object_with_master_key(object_id, master_key.as_ref())?,
+                        )?;
+                    }
                     report.warnings.extend(writer.restore_metadata(
                         &target,
                         &entry.to_file_entry_at(&target),
                         options.strategy,
                     )?);
+                    restored_files
+                        .insert((entry.source_index, entry.relative_path.clone()), target);
                 }
                 FileKind::Symlink => {
                     if options.path_strategy == RestorePathStrategy::Flatten && is_multi_source {
@@ -1902,6 +2018,7 @@ impl SnapshotEntry {
             relative_path: restored_path.to_path_buf(),
             file_type: self.kind,
             metadata: self.metadata.clone(),
+            hard_link_identity: None,
         }
     }
 }
@@ -1938,6 +2055,7 @@ fn scan_into_snapshot_file(
     compression_algorithm: CompressionAlgorithm,
     encryption_algorithm: EncryptionAlgorithm,
     master_key: Option<&RepositoryMasterKey>,
+    hard_link_targets: &mut HashMap<crate::filesystem::HardLinkIdentity, HardLinkTarget>,
     snapshot_file: &mut SnapshotFile,
 ) -> BackupCoreResult<()> {
     let entries = match fs::read_dir(current) {
@@ -1963,6 +2081,7 @@ fn scan_into_snapshot_file(
                 source_index,
                 file_entry.clone(),
                 None,
+                None,
             ));
             scan_into_snapshot_file(
                 root,
@@ -1974,6 +2093,7 @@ fn scan_into_snapshot_file(
                 compression_algorithm,
                 encryption_algorithm,
                 master_key,
+                hard_link_targets,
                 snapshot_file,
             )?;
             continue;
@@ -1987,10 +2107,12 @@ fn scan_into_snapshot_file(
             let link_target = match provider.read_link(&path) {
                 Ok(link_target) => link_target,
                 Err(error) if is_skippable_scan_error(&error) => {
-                    snapshot_file.entries.push(SnapshotEntry::unsupported_from_file_entry(
-                        source_index,
-                        file_entry,
-                    ));
+                    snapshot_file
+                        .entries
+                        .push(SnapshotEntry::unsupported_from_file_entry(
+                            source_index,
+                            file_entry,
+                        ));
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -2013,6 +2135,7 @@ fn scan_into_snapshot_file(
                 source_index,
                 file_entry,
                 None,
+                None,
             ));
             continue;
         }
@@ -2020,10 +2143,12 @@ fn scan_into_snapshot_file(
         let bytes = match provider.read_file(&path) {
             Ok(bytes) => bytes,
             Err(error) if is_skippable_scan_error(&error) => {
-                snapshot_file.entries.push(SnapshotEntry::unsupported_from_file_entry(
-                    source_index,
-                    file_entry,
-                ));
+                snapshot_file
+                    .entries
+                    .push(SnapshotEntry::unsupported_from_file_entry(
+                        source_index,
+                        file_entry,
+                    ));
                 continue;
             }
             Err(error) => return Err(error),
@@ -2035,7 +2160,25 @@ fn scan_into_snapshot_file(
             master_key,
         )?;
 
-        snapshot_file.push_entry(source_index, file_entry, Some(stored_object.object_id));
+        let hard_link_target = file_entry.hard_link_identity.and_then(|identity| {
+            let current = HardLinkTarget {
+                source_index,
+                relative_path: file_entry.relative_path.clone(),
+            };
+            match hard_link_targets.get(&identity) {
+                Some(target) => Some(target.clone()),
+                None => {
+                    hard_link_targets.insert(identity, current);
+                    None
+                }
+            }
+        });
+        snapshot_file.push_entry(
+            source_index,
+            file_entry,
+            Some(stored_object.object_id),
+            hard_link_target,
+        );
     }
 
     Ok(())
@@ -2067,11 +2210,13 @@ impl SnapshotFile {
         source_index: usize,
         file_entry: FileEntry,
         object_id: Option<ObjectId>,
+        hard_link_target: Option<HardLinkTarget>,
     ) {
         self.entries.push(SnapshotEntry::from_file_entry(
             source_index,
             file_entry,
             object_id,
+            hard_link_target,
         ));
     }
 }
@@ -2079,13 +2224,14 @@ impl SnapshotFile {
 impl SnapshotEntry {
     fn unsupported_from_file_entry(source_index: usize, mut file_entry: FileEntry) -> Self {
         file_entry.file_type = FileKind::Other;
-        Self::from_file_entry(source_index, file_entry, None)
+        Self::from_file_entry(source_index, file_entry, None, None)
     }
 
     fn from_file_entry(
         source_index: usize,
         file_entry: FileEntry,
         object_id: Option<ObjectId>,
+        hard_link_target: Option<HardLinkTarget>,
     ) -> Self {
         Self {
             source_index,
@@ -2094,6 +2240,7 @@ impl SnapshotEntry {
             size: file_entry.metadata.size,
             modified_unix_seconds: file_entry.metadata.modified_unix_seconds,
             object_id,
+            hard_link_target,
             link_target: None,
             metadata: file_entry.metadata,
         }
@@ -2111,6 +2258,7 @@ impl SnapshotEntry {
             size: file_entry.metadata.size,
             modified_unix_seconds: file_entry.metadata.modified_unix_seconds,
             object_id: None,
+            hard_link_target: None,
             link_target: Some(link_target),
             metadata: file_entry.metadata,
         }
@@ -2417,6 +2565,14 @@ fn write_snapshot_file(path: &Path, snapshot_file: &SnapshotFile) -> BackupCoreR
         if let Some(link_target) = &entry.link_target {
             output.push_str(&escape_field(&link_target.to_string_lossy()));
         }
+        output.push('\t');
+        if let Some(hard_link_target) = &entry.hard_link_target {
+            output.push_str(&hard_link_target.source_index.to_string());
+            output.push(':');
+            output.push_str(&escape_field(
+                &hard_link_target.relative_path.to_string_lossy(),
+            ));
+        }
         output.push('\n');
     }
 
@@ -2519,7 +2675,7 @@ fn read_snapshot_file(path: &Path) -> BackupCoreResult<SnapshotFile> {
 
 fn parse_entry_line(parts: &[&str], line: &str) -> BackupCoreResult<SnapshotEntry> {
     match parts.len() {
-        11 | 12 => parse_current_entry_line(parts, line),
+        11 | 12 | 13 => parse_current_entry_line(parts, line),
         _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid entry line: {line}"
         ))),
@@ -2577,6 +2733,12 @@ fn parse_entry_fields(
         .map(unescape_field)
         .transpose()?
         .map(PathBuf::from);
+    let hard_link_target = extra
+        .get(5)
+        .copied()
+        .filter(|value| !value.is_empty())
+        .map(parse_hard_link_target)
+        .transpose()?;
 
     Ok(SnapshotEntry {
         source_index,
@@ -2585,6 +2747,7 @@ fn parse_entry_fields(
         size,
         modified_unix_seconds,
         object_id,
+        hard_link_target,
         link_target,
         metadata: Metadata {
             size,
@@ -2594,6 +2757,18 @@ fn parse_entry_fields(
             readonly,
             platform,
         },
+    })
+}
+
+fn parse_hard_link_target(value: &str) -> BackupCoreResult<HardLinkTarget> {
+    let (source_index, relative_path) = value.split_once(':').ok_or_else(|| {
+        BackupError::InvalidSnapshot(format!("invalid hard link target: {value}"))
+    })?;
+    Ok(HardLinkTarget {
+        source_index: source_index.parse::<usize>().map_err(|_| {
+            BackupError::InvalidSnapshot(format!("invalid hard link source index: {source_index}"))
+        })?,
+        relative_path: PathBuf::from(unescape_field(relative_path)?),
     })
 }
 
@@ -2713,6 +2888,8 @@ fn parse_platform_metadata(value: &str) -> BackupCoreResult<PlatformMetadata> {
             is_device: parse_optional_bool(parts.get(6).copied().unwrap_or(""))?,
             device_major: parse_optional_u64(parts.get(7).copied().unwrap_or(""))?,
             device_minor: parse_optional_u64(parts.get(8).copied().unwrap_or(""))?,
+            filesystem_device: None,
+            inode: None,
         })),
         _ => Err(BackupError::InvalidSnapshot(format!(
             "invalid platform metadata: {value}"

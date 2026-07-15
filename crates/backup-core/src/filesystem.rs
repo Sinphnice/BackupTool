@@ -76,6 +76,8 @@ pub struct PosixMetadata {
     pub is_device: bool,
     pub device_major: Option<u64>,
     pub device_minor: Option<u64>,
+    pub filesystem_device: Option<u64>,
+    pub inode: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,13 @@ pub struct FileEntry {
     pub relative_path: PathBuf,
     pub file_type: FileType,
     pub metadata: Metadata,
+    pub hard_link_identity: Option<HardLinkIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HardLinkIdentity {
+    pub filesystem_device: u64,
+    pub inode: u64,
 }
 
 pub trait FileSystemProvider {
@@ -95,8 +104,13 @@ pub trait FileSystemWriter {
     fn create_directory(&self, path: &Path) -> BackupCoreResult<()>;
     fn create_symlink(&self, path: &Path, target: &Path) -> BackupCoreResult<Vec<RestoreWarning>>;
     fn create_fifo(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>>;
-    fn create_device(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>>;
+    fn create_device(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+    ) -> BackupCoreResult<Vec<RestoreWarning>>;
     fn write_file(&self, path: &Path, bytes: &[u8]) -> BackupCoreResult<()>;
+    fn create_hard_link(&self, path: &Path, target: &Path) -> BackupCoreResult<()>;
     fn restore_metadata(
         &self,
         path: &Path,
@@ -206,6 +220,14 @@ impl FileSystemWriter for BasicFileSystemProvider {
         Ok(())
     }
 
+    fn create_hard_link(&self, path: &Path, target: &Path) -> BackupCoreResult<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::hard_link(target, path)?;
+        Ok(())
+    }
+
     fn create_symlink(&self, path: &Path, target: &Path) -> BackupCoreResult<Vec<RestoreWarning>> {
         create_symlink(path, target)
     }
@@ -214,7 +236,11 @@ impl FileSystemWriter for BasicFileSystemProvider {
         create_fifo(path, entry)
     }
 
-    fn create_device(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>> {
+    fn create_device(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
         create_device(path, entry)
     }
 
@@ -310,6 +336,14 @@ impl FileSystemWriter for AutoFileSystemProvider {
         }
     }
 
+    fn create_hard_link(&self, path: &Path, target: &Path) -> BackupCoreResult<()> {
+        match self.kind {
+            ProviderKind::Basic => BasicFileSystemProvider.create_hard_link(path, target),
+            ProviderKind::Windows => WindowsFileSystemProvider.create_hard_link(path, target),
+            ProviderKind::Posix => PosixFileSystemProvider.create_hard_link(path, target),
+        }
+    }
+
     fn create_symlink(&self, path: &Path, target: &Path) -> BackupCoreResult<Vec<RestoreWarning>> {
         match self.kind {
             ProviderKind::Basic => BasicFileSystemProvider.create_symlink(path, target),
@@ -326,7 +360,11 @@ impl FileSystemWriter for AutoFileSystemProvider {
         }
     }
 
-    fn create_device(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>> {
+    fn create_device(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
         match self.kind {
             ProviderKind::Basic => BasicFileSystemProvider.create_device(path, entry),
             ProviderKind::Windows => WindowsFileSystemProvider.create_device(path, entry),
@@ -395,6 +433,10 @@ impl FileSystemWriter for WindowsFileSystemProvider {
         BasicFileSystemProvider.write_file(path, bytes)
     }
 
+    fn create_hard_link(&self, path: &Path, target: &Path) -> BackupCoreResult<()> {
+        BasicFileSystemProvider.create_hard_link(path, target)
+    }
+
     fn create_symlink(&self, path: &Path, target: &Path) -> BackupCoreResult<Vec<RestoreWarning>> {
         create_symlink(path, target)
     }
@@ -403,7 +445,11 @@ impl FileSystemWriter for WindowsFileSystemProvider {
         create_fifo(path, entry)
     }
 
-    fn create_device(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>> {
+    fn create_device(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
         create_device(path, entry)
     }
 
@@ -460,6 +506,21 @@ impl FileSystemWriter for PosixFileSystemProvider {
         BasicFileSystemProvider.write_file(path, bytes)
     }
 
+    fn create_hard_link(&self, path: &Path, target: &Path) -> BackupCoreResult<()> {
+        #[cfg(windows)]
+        if let (Some((distribution, linux_path)), Some((target_distribution, target_linux_path))) =
+            (wsl_unc_path(path), wsl_unc_path(target))
+        {
+            if distribution != target_distribution {
+                return Err(BackupError::InvalidRepository(
+                    "cannot create a hard link across WSL distributions".into(),
+                ));
+            }
+            return create_wsl_hard_link(&distribution, &linux_path, &target_linux_path);
+        }
+        BasicFileSystemProvider.create_hard_link(path, target)
+    }
+
     fn create_symlink(&self, path: &Path, target: &Path) -> BackupCoreResult<Vec<RestoreWarning>> {
         #[cfg(windows)]
         if let Some((distribution, linux_path)) = wsl_unc_path(path) {
@@ -476,7 +537,11 @@ impl FileSystemWriter for PosixFileSystemProvider {
         create_fifo(path, entry)
     }
 
-    fn create_device(&self, path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWarning>> {
+    fn create_device(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+    ) -> BackupCoreResult<Vec<RestoreWarning>> {
         #[cfg(windows)]
         if let Some((distribution, linux_path)) = wsl_unc_path(path) {
             return create_wsl_device(&distribution, &linux_path, entry);
@@ -542,6 +607,7 @@ fn read_entry_with_platform(
             readonly: metadata.permissions().readonly(),
             platform,
         },
+        hard_link_identity: hard_link_identity(&metadata, file_type),
     })
 }
 
@@ -596,8 +662,8 @@ fn detect_file_type(metadata: &fs::Metadata) -> FileType {
 
 #[cfg(windows)]
 fn read_wsl_entry(root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
-    let (distribution, linux_path) = wsl_unc_path(path)
-        .ok_or_else(|| BackupError::SourceDoesNotExist(path.to_path_buf()))?;
+    let (distribution, linux_path) =
+        wsl_unc_path(path).ok_or_else(|| BackupError::SourceDoesNotExist(path.to_path_buf()))?;
     let output = Command::new("wsl.exe")
         .args([
             "-d",
@@ -605,7 +671,7 @@ fn read_wsl_entry(root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
             "--",
             "stat",
             "-c",
-            "%f\t%s\t%Y\t%X\t%W\t%u\t%g\t%t\t%T",
+            "%f\t%s\t%Y\t%X\t%W\t%u\t%g\t%t\t%T\t%d\t%i",
             "--",
             &linux_path,
         ])
@@ -628,7 +694,7 @@ fn read_wsl_entry(root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
         ))
     })?;
     let parts = text.trim_end().split('\t').collect::<Vec<_>>();
-    if parts.len() != 9 {
+    if parts.len() != 11 {
         return Err(BackupError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid WSL stat field count: {}", parts.len()),
@@ -644,6 +710,8 @@ fn read_wsl_entry(root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
     let gid = parts[6].parse::<u32>().map_err(invalid_wsl_stat_field)?;
     let raw_device_major = parse_wsl_device_number(parts[7])?;
     let raw_device_minor = parse_wsl_device_number(parts[8])?;
+    let filesystem_device = parts[9].parse::<u64>().map_err(invalid_wsl_stat_field)?;
+    let inode = parts[10].parse::<u64>().map_err(invalid_wsl_stat_field)?;
     let relative_path = path
         .strip_prefix(root)
         .map_err(|_| BackupError::SourceDoesNotExist(root.to_path_buf()))?
@@ -680,8 +748,14 @@ fn read_wsl_entry(root: &Path, path: &Path) -> BackupCoreResult<FileEntry> {
                 is_device,
                 device_major,
                 device_minor,
+                filesystem_device: Some(filesystem_device),
+                inode: Some(inode),
             }),
         },
+        hard_link_identity: (file_type == FileType::File).then_some(HardLinkIdentity {
+            filesystem_device,
+            inode,
+        }),
     })
 }
 
@@ -717,7 +791,16 @@ fn create_wsl_symlink(
 ) -> BackupCoreResult<Vec<RestoreWarning>> {
     let target = target.to_string_lossy().replace('\\', "/");
     let output = Command::new("wsl.exe")
-        .args(["-d", distribution, "--", "ln", "-s", "--", &target, linux_path])
+        .args([
+            "-d",
+            distribution,
+            "--",
+            "ln",
+            "-s",
+            "--",
+            &target,
+            linux_path,
+        ])
         .output()?;
     if output.status.success() {
         Ok(Vec::new())
@@ -1016,8 +1099,7 @@ fn parse_wsl_device_number(value: &str) -> BackupCoreResult<u64> {
     if value.is_empty() {
         return Ok(0);
     }
-    u64::from_str_radix(value, 16)
-        .map_err(invalid_wsl_stat_field)
+    u64::from_str_radix(value, 16).map_err(invalid_wsl_stat_field)
 }
 
 #[cfg(windows)]
@@ -1085,6 +1167,8 @@ fn posix_metadata(metadata: &fs::Metadata) -> PosixMetadata {
         is_device: file_type.is_block_device() || file_type.is_char_device(),
         device_major: None,
         device_minor: None,
+        filesystem_device: Some(metadata.dev()),
+        inode: Some(metadata.ino()),
     }
 }
 
@@ -1099,7 +1183,55 @@ fn posix_metadata(metadata: &fs::Metadata) -> PosixMetadata {
         is_device: false,
         device_major: None,
         device_minor: None,
+        filesystem_device: None,
+        inode: None,
     }
+}
+
+#[cfg(windows)]
+fn create_wsl_hard_link(
+    distribution: &str,
+    linux_path: &str,
+    target_linux_path: &str,
+) -> BackupCoreResult<()> {
+    let output = Command::new("wsl.exe")
+        .args([
+            "-d",
+            distribution,
+            "--",
+            "ln",
+            "--",
+            target_linux_path,
+            linux_path,
+        ])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "failed to create WSL hard link {}: {}",
+                linux_path,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn hard_link_identity(metadata: &fs::Metadata, file_type: FileType) -> Option<HardLinkIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    (file_type == FileType::File).then_some(HardLinkIdentity {
+        filesystem_device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn hard_link_identity(_metadata: &fs::Metadata, _file_type: FileType) -> Option<HardLinkIdentity> {
+    None
 }
 
 fn restore_basic_metadata(
@@ -1178,12 +1310,11 @@ fn create_fifo(path: &Path, entry: &FileEntry) -> BackupCoreResult<Vec<RestoreWa
         fs::create_dir_all(parent)?;
     }
 
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        BackupError::MetadataRestore {
+    let c_path =
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| BackupError::MetadataRestore {
             path: entry.relative_path.clone(),
             message: "fifo path contains interior NUL byte".to_string(),
-        }
-    })?;
+        })?;
     let mode = match &entry.metadata.platform {
         PlatformMetadata::Posix(metadata) => metadata.mode.unwrap_or(0o644) & 0o777,
         _ => 0o644,
